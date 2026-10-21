@@ -532,6 +532,11 @@ struct vdin_v4l2_param_s {
 	__u8 secure_memory_en; /* 0:not secure memory 1:secure memory */
 };
 
+/* yuv422 10bit full pack, one plane */
+#define V4L2_PIX_FMT_AML_YUV422_10P	v4l2_fourcc('A', 'Y', '2', 'P')
+/* the chroma of a pair is the even pixel's, not an average of the two */
+#define V4L2_PIX_FMT_FLAG_AML_COSITED_CHROMA	0x80
+
 enum tvin_cn_type_e {
 	GRAPHICS,
 	PHOTO,
