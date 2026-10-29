@@ -4255,6 +4255,8 @@ static int amdv_policy_process_v1(struct vframe_s *vf,
 			mode_change = 1;
 		}
 	} else if (dolby_vision_policy == AMDV_FORCE_OUTPUT_MODE) {
+		/* pairs with smp_wmb() in set_amdv_policy() */
+		smp_rmb();
 		if (force_mode == AMDV_OUTPUT_MODE_IPT || force_mode == AMDV_OUTPUT_MODE_IPT_TUNNEL) {
 			if ((vinfo && sink_support_dv(vinfo) && is_match_amdv_attr()) ||
 				debug_force_mode) {
@@ -4719,6 +4721,8 @@ static int amdv_policy_process_v2_stb(struct vframe_s *vf,
 			mode_change = 1;
 		}
 	} else if (dolby_vision_policy == AMDV_FORCE_OUTPUT_MODE) {
+		/* pairs with smp_wmb() in set_amdv_policy() */
+		smp_rmb();
 		if (force_mode == AMDV_OUTPUT_MODE_IPT || force_mode == AMDV_OUTPUT_MODE_IPT_TUNNEL) {
 			if (src_format == FORMAT_HDR10PLUS && vinfo && sink_support_hdr10_plus(vinfo))
 			{
@@ -14165,6 +14169,13 @@ EXPORT_SYMBOL(get_amdv_ll_policy);
 
 void set_amdv_policy(int policy)
 {
+	/* keep the current output until userspace writes a forced mode */
+	if (policy == AMDV_FORCE_OUTPUT_MODE &&
+	    dolby_vision_policy != AMDV_FORCE_OUTPUT_MODE) {
+		force_mode = dolby_vision_mode;
+		/* the engine must not see the policy before the mode */
+		smp_wmb();
+	}
 	dolby_vision_policy = policy;
 }
 EXPORT_SYMBOL(set_amdv_policy);
