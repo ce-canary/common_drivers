@@ -14162,6 +14162,10 @@ EXPORT_SYMBOL(get_amdv_ll_policy);
 
 void set_amdv_policy(int policy)
 {
+	/* keep the current output until userspace writes a forced mode */
+	if (policy == AMDV_FORCE_OUTPUT_MODE &&
+	    dolby_vision_policy != AMDV_FORCE_OUTPUT_MODE)
+		force_mode = dolby_vision_mode;
 	dolby_vision_policy = policy;
 }
 EXPORT_SYMBOL(set_amdv_policy);
