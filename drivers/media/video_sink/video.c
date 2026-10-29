@@ -1036,6 +1036,7 @@ static void video_vf_unreg_provider(void)
 	int keeped = 0, ret = 0;
 #ifdef CONFIG_AMLOGIC_MEDIA_VSYNC_RDMA
 	int i;
+	struct vframe_s *put_vf[DISPBUF_TO_PUT_MAX];
 #endif
 
 	clear_vsync_2to1_info();
@@ -1068,8 +1069,10 @@ static void video_vf_unreg_provider(void)
 	}
 #ifdef CONFIG_AMLOGIC_MEDIA_VSYNC_RDMA
 	dispbuf_to_put_num[0] = 0;
-	for (i = 0; i < DISPBUF_TO_PUT_MAX; i++)
+	for (i = 0; i < DISPBUF_TO_PUT_MAX; i++) {
+		put_vf[i] = dispbuf_to_put[0][i];
 		dispbuf_to_put[0][i] = NULL;
+	}
 	cur_rdma_buf[0] = NULL;
 #endif
 	if (cur_dispbuf[0]) {
@@ -1232,6 +1235,12 @@ static void video_vf_unreg_provider(void)
 	if (cur_dispbuf[0])
 		keeped = vf_keep_current
 			(cur_dispbuf[0], el_vf);
+#ifdef CONFIG_AMLOGIC_MEDIA_VSYNC_RDMA
+	if (keeped > 0) {
+		for (i = 0; i < DISPBUF_TO_PUT_MAX; i++)
+			video_keeper_hold_put(0, put_vf[i]);
+	}
+#endif
 
 	pr_info("%s: vd1 used: %s, vd2 used: %s, vd3 used: %s, keep_ret:%d, black_out:%d, cur_dispbuf:%p\n",
 		__func__,
