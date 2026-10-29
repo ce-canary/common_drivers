@@ -62,6 +62,9 @@ static int keep_dw_id[MAX_VD_LAYER];
 static int keep_el_id[MAX_VD_LAYER];
 static int keep_el_head_id[MAX_VD_LAYER];
 static int keep_el_dw_id[MAX_VD_LAYER];
+static DEFINE_SPINLOCK(keep_put_lock);
+static int keep_put_id[MAX_VD_LAYER][DISPBUF_TO_PUT_MAX * 3];
+static int keep_put_num[MAX_VD_LAYER];
 
 #define Y_BUFFER_SIZE   0x600000	/* for 1920*1088 */
 #define U_BUFFER_SIZE   0x100000	/* compatible with NV21 */
@@ -969,6 +972,84 @@ void video_keeper_new_frame_notify(u8 layer_id)
 		}
 	}
 	return;
+}
+
+static void video_keeper_hold_put_mem(u8 layer_id, void *mem_handle,
+				      int type)
+{
+	unsigned long flags;
+	int id;
+	int i;
+
+	if (!mem_handle)
+		return;
+	id = codec_mm_keeper_mask_keep_mem(mem_handle, type);
+	if (id <= 0)
+		return;
+	/* same mem as the kept frame: the keeper did not add a user */
+	if (id == keep_id[layer_id] || id == keep_head_id[layer_id] ||
+	    id == keep_dw_id[layer_id])
+		return;
+	spin_lock_irqsave(&keep_put_lock, flags);
+	for (i = 0; i < keep_put_num[layer_id]; i++)
+		if (keep_put_id[layer_id][i] == id)
+			break;
+	if (i == keep_put_num[layer_id]) {
+		if (i < ARRAY_SIZE(keep_put_id[layer_id])) {
+			keep_put_id[layer_id][i] = id;
+			keep_put_num[layer_id]++;
+		} else {
+			codec_mm_keeper_unmask_keeper(id, 0);
+		}
+	}
+	spin_unlock_irqrestore(&keep_put_lock, flags);
+}
+
+/*
+ * hold a frame whose put was deferred to the next vsync,
+ * vd still scans it until rdma latches the kept frame.
+ */
+void video_keeper_hold_put(u8 layer_id, struct vframe_s *vf)
+{
+	int type = MEM_TYPE_CODEC_MM;
+
+	if (layer_id >= MAX_VD_LAYER || !vf)
+		return;
+	if (vf->source_type == VFRAME_SOURCE_TYPE_HDMI ||
+	    vf->source_type == VFRAME_SOURCE_TYPE_CVBS ||
+	    vf->source_type == VFRAME_SOURCE_TYPE_PPMGR)
+		return;
+	if (IS_DI_PROCESSED(vf->type)) {
+		if (!vf->vf_ext || !(vf->flag & VFRAME_FLAG_DOUBLE_FRAM))
+			return;
+		vf = (struct vframe_s *)vf->vf_ext;
+	}
+	if (vf->type & VIDTYPE_SCATTER)
+		type = MEM_TYPE_CODEC_MM_SCATTER;
+	mutex_lock(&video_keeper_mutex);
+	video_keeper_hold_put_mem(layer_id, vf->mem_handle, type);
+	video_keeper_hold_put_mem(layer_id, vf->mem_head_handle,
+				  MEM_TYPE_CODEC_MM);
+	video_keeper_hold_put_mem(layer_id, vf->mem_dw_handle,
+				  MEM_TYPE_CODEC_MM);
+	mutex_unlock(&video_keeper_mutex);
+}
+
+/*
+ * call in vsync irq.
+ */
+void video_keeper_put_notify(u8 layer_id)
+{
+	unsigned long flags;
+	int i;
+
+	if (layer_id >= MAX_VD_LAYER)
+		return;
+	spin_lock_irqsave(&keep_put_lock, flags);
+	for (i = 0; i < keep_put_num[layer_id]; i++)
+		codec_mm_keeper_unmask_keeper(keep_put_id[layer_id][i], 0);
+	keep_put_num[layer_id] = 0;
+	spin_unlock_irqrestore(&keep_put_lock, flags);
 }
 
 #ifdef CONFIG_AMLOGIC_MEDIA_GE2D
