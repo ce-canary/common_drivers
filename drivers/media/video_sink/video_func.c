@@ -2716,6 +2716,7 @@ static void vd_dispbuf_to_put(int layer_id)
 			}
 		}
 	}
+	video_keeper_put_notify(layer_id);
 #endif
 }
 
