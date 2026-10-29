@@ -9,6 +9,8 @@
 #include <linux/amlogic/media/vfm/vframe.h>
 
 void video_keeper_new_frame_notify(u8 layer_id);
+void video_keeper_hold_put(u8 layer_id, struct vframe_s *vf);
+void video_keeper_put_notify(u8 layer_id);
 void try_free_keep_video(int flags);
 void try_free_keep_vdx(int flags, u8 layer_id);
 int video_keeper_init(void);
