@@ -1758,6 +1758,14 @@ void disable_vd1_blend_s5(struct video_layer_s *layer)
 
 	if (!layer)
 		return;
+#ifdef CONFIG_AMLOGIC_MEDIA_ENHANCEMENT_DOLBYVISION
+	if (cur_dispbuf2 == &vf_local2) {
+		cur_dispbuf2 = NULL;
+		dvel_status = false;
+		disable_vd2_blend_s5(&vd_layer[1]);
+		safe_switch_videolayer(1, false, true);
+	}
+#endif
 	if (layer->layer_id == 0 && layer->slice_num > 1) {
 		for (slice = 0; slice < layer->slice_num; slice++)
 			disable_vd1_slice_blend_s5(layer, slice);
