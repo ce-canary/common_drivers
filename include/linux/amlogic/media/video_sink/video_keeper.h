@@ -22,4 +22,5 @@ unsigned int vf_keep_current_locked
 	(u8 layer_id,
 	struct vframe_s *cur_dispbuf,
 	struct vframe_s *cur_dispbuf_el);
+bool video_keeper_el_kept(u8 layer_id);
 #endif
