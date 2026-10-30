@@ -207,6 +207,8 @@ static struct drm_driver meson_driver = {
 #endif
 
 	/* Misc */
+	.master_set		= meson_crtc_master_set,
+	.master_drop		= meson_crtc_master_drop,
 	.fops			= &meson_drm_fops,
 	.name			= DRIVER_NAME,
 	.desc			= DRIVER_DESC,
