@@ -1501,8 +1501,11 @@ void primary_swap_frame(struct video_layer_s *layer,
 		force_toggle = true;
 	}
 
+	if (cur_dispbuf2 == &vf_local2 && !is_local_vf(vf1))
+		cur_dispbuf2 = NULL;
 	if (is_amdv_enable())
-		vf_with_el = has_enhanced_layer(vf);
+		vf_with_el = has_enhanced_layer(vf) ||
+			     cur_dispbuf2 == &vf_local2;
 
 	/* FIXME: need check the pre seq */
 	if (vf->early_process_fun) {

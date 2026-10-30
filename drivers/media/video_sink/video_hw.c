@@ -4843,6 +4843,7 @@ static void vdx_scaler_setting(struct video_layer_s *layer, struct scaler_settin
 	}
 }
 
+static void disable_vd2_blend(struct video_layer_s *layer);
 static void disable_vd1_blend(struct video_layer_s *layer)
 {
 	u32 misc_off;
@@ -4889,6 +4890,15 @@ static void disable_vd1_blend(struct video_layer_s *layer)
 				(AMDV_PATH_CTRL + misc_off,
 				3, 0, 2);
 	}
+#ifdef CONFIG_AMLOGIC_MEDIA_ENHANCEMENT_DOLBYVISION
+	/* the el of a kept frame must not reach the vpp once vd2 bypasses core1 */
+	if (cur_dispbuf2 == &vf_local2) {
+		cur_dispbuf2 = NULL;
+		dvel_status = false;
+		disable_vd2_blend(&vd_layer[1]);
+		safe_switch_videolayer(1, false, true);
+	}
+#endif
 
 	/*auto disable sr when video off*/
 	if (!is_meson_txl_cpu() &&

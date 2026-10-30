@@ -1031,6 +1031,7 @@ static void video_vf_unreg_provider(void)
 	bool layer1_used = false;
 	bool layer2_used = false;
 	bool layer3_used = false;
+	bool keep_el = false;
 
 	struct vframe_s *el_vf = NULL;
 	int keeped = 0, ret = 0;
@@ -1140,7 +1141,10 @@ static void video_vf_unreg_provider(void)
 		cur_dispbuf[0]->video_angle = 0;
 	}
 
-	if (cur_dispbuf2)
+	if (is_amdv_enable() && cur_dispbuf2 && vd_layer[0].enabled &&
+	    !(blackout[0] | force_blackout))
+		keep_el = true;
+	if (cur_dispbuf2 && !keep_el)
 		need_disable_vd[1] = true;
 	if (is_amdv_enable()) {
 		if (cur_dispbuf2 == &vf_local2) {
@@ -1149,7 +1153,8 @@ static void video_vf_unreg_provider(void)
 			vf_local2 = *cur_dispbuf2;
 			el_vf = &vf_local2;
 		}
-		cur_dispbuf2 = NULL;
+		/* the composer of a kept dv frame still needs its el on vd2 */
+		cur_dispbuf2 = keep_el ? &vf_local2 : NULL;
 	}
 	if (trickmode_fffb) {
 		atomic_set(&trickmode_framedone, 0);
@@ -1241,6 +1246,14 @@ static void video_vf_unreg_provider(void)
 			video_keeper_hold_put(0, put_vf[i]);
 	}
 #endif
+	if (keep_el && (keeped <= 0 || !video_keeper_el_kept(0))) {
+		spin_lock_irqsave(&lock, flags);
+		if (cur_dispbuf2 == &vf_local2) {
+			cur_dispbuf2 = NULL;
+			need_disable_vd[1] = true;
+		}
+		spin_unlock_irqrestore(&lock, flags);
+	}
 
 	pr_info("%s: vd1 used: %s, vd2 used: %s, vd3 used: %s, keep_ret:%d, black_out:%d, cur_dispbuf:%p\n",
 		__func__,

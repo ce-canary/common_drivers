@@ -918,6 +918,7 @@ s32 config_dvel_pps(struct video_layer_s *layer,
 s32 config_dvel_blend(struct video_layer_s *layer,
 		      struct blend_setting_s *setting,
 		      struct vframe_s *dvel_vf);
+extern bool dvel_status;
 #endif
 
 #ifdef TV_3D_FUNCTION_OPEN
@@ -1061,6 +1062,7 @@ extern struct vframe_s vf_local2;
 extern struct vframe_s vf_local_ext[MAX_VD_LAYER];
 
 extern struct vframe_s *cur_dispbuf[MAX_VD_LAYER];
+extern struct vframe_s *cur_dispbuf2;
 extern bool need_disable_vd[MAX_VD_LAYER];
 extern u32 last_el_status;
 extern u32 video_prop_status;
