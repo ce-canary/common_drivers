@@ -1256,6 +1256,18 @@ unsigned int vf_keep_current(struct vframe_s *cur_buf,
 	return ret;
 }
 
+bool video_keeper_el_kept(u8 layer_id)
+{
+	bool ret;
+
+	if (layer_id > 1)
+		return false;
+	mutex_lock(&video_keeper_mutex);
+	ret = keep_el_id[layer_id] > 0;
+	mutex_unlock(&video_keeper_mutex);
+	return ret;
+}
+
 int video_keeper_init(void)
 {
 #ifdef CONFIG_AMLOGIC_MEDIA_GE2D
