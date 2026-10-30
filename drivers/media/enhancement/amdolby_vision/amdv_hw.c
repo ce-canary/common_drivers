@@ -1921,6 +1921,10 @@ static int dv_core1a_set(u32 dm_count,
 				VSYNC_WR_DV_REG_BITS
 					(AMDV_PATH_CTRL,
 					 0, 0, 1);
+				if (el_enable)
+					VSYNC_WR_DV_REG_BITS
+						(AMDV_PATH_CTRL,
+						 0, 1, 1);
 			} else if (is_aml_tm2_stbmode()) {
 				VSYNC_WR_DV_REG_BITS
 					(AMDV_PATH_CTRL,
