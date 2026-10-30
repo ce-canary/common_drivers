@@ -399,6 +399,18 @@ static int meson_crtc_atomic_get_property(struct drm_crtc *crtc,
 	return ret;
 }
 
+/*
+ * The policy properties write module globals, which outlive the master
+ * that set them, also a master that crashed: the value before its first
+ * write is put back when it is dropped.
+ */
+static bool master_hdr_policy_set;
+static int master_hdr_policy;
+static bool master_dv_policy_set;
+static int master_dv_policy;
+static bool master_force_output_set;
+static enum output_format_e master_force_output;
+
 static int meson_crtc_atomic_set_property(struct drm_crtc *crtc,
 	struct drm_crtc_state *state,
 	struct drm_property *property,
@@ -427,12 +439,24 @@ static int meson_crtc_atomic_set_property(struct drm_crtc *crtc,
 		set_amdv_mode(val);
 		return 0;
 	} else if (property == meson_crtc->hdr_policy_property) {
+		if (!master_hdr_policy_set) {
+			master_hdr_policy = get_hdr_policy();
+			master_hdr_policy_set = true;
+		}
 		set_hdr_policy(val);
 		return 0;
 	} else if (property == meson_crtc->force_output_property) {
+		if (!master_force_output_set) {
+			master_force_output = get_force_output();
+			master_force_output_set = true;
+		}
 		set_force_output(val);
 		return 0;
 	} else if (property == meson_crtc->dv_policy_property) {
+		if (!master_dv_policy_set) {
+			master_dv_policy = get_amdv_policy();
+			master_dv_policy_set = true;
+		}
 		set_amdv_policy(val);
 		return 0;
 	} else if (property == meson_crtc->dv_ll_policy_property) {
@@ -470,6 +494,28 @@ static int meson_crtc_atomic_set_property(struct drm_crtc *crtc,
 	}
 
 	return ret;
+}
+
+void meson_crtc_master_set(struct drm_device *dev, struct drm_file *file_priv,
+			   bool from_open)
+{
+	master_hdr_policy_set = false;
+	master_dv_policy_set = false;
+	master_force_output_set = false;
+}
+
+void meson_crtc_master_drop(struct drm_device *dev, struct drm_file *file_priv)
+{
+	/* set_hdr_policy() also writes the dv policy while dv is enabled */
+	if (master_hdr_policy_set && get_hdr_policy() != master_hdr_policy)
+		set_hdr_policy(master_hdr_policy);
+	if (master_dv_policy_set && get_amdv_policy() != master_dv_policy)
+		set_amdv_policy(master_dv_policy);
+	if (master_force_output_set && get_force_output() != master_force_output)
+		set_force_output(master_force_output);
+	master_hdr_policy_set = false;
+	master_dv_policy_set = false;
+	master_force_output_set = false;
 }
 
 static void meson_crtc_atomic_print_state(struct drm_printer *p,
