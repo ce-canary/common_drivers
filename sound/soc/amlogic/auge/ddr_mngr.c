@@ -1537,6 +1537,35 @@ unsigned int aml_frddr_get_position(struct frddr *fr)
 	return aml_audiobus_read(actrl, reg);
 }
 
+static unsigned int aml_frddr_get_fifo_bytes(struct frddr *fr)
+{
+	struct aml_audio_controller *actrl = fr->actrl;
+	unsigned int reg_base = fr->reg_base;
+	unsigned int reg;
+
+	reg = calc_frddr_address(EE_AUDIO_FRDDR_A_STATUS1, reg_base);
+	return ((aml_audiobus_read(actrl, reg) & FRDDR_FIFO_CNT) >> 8) * FIFO_BURST;
+}
+
+/*
+ * A refill moves the position and the fifo fill together. The link is
+ * nonatomic, so a refill can land between the reads: read until the
+ * position holds across the fill read.
+ */
+unsigned int aml_frddr_get_position_fill(struct frddr *fr, unsigned int *fill)
+{
+	unsigned int pos, last;
+
+	pos = aml_frddr_get_position(fr);
+	do {
+		last = pos;
+		*fill = aml_frddr_get_fifo_bytes(fr);
+		pos = aml_frddr_get_position(fr);
+	} while (pos != last);
+
+	return pos;
+}
+
 static bool aml_frddr_burst_finished(struct frddr *fr)
 {
 	struct aml_audio_controller *actrl = fr->actrl;
