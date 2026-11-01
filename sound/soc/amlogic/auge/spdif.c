@@ -1319,6 +1319,10 @@ static void aml_dai_spdif_shutdown(struct snd_pcm_substream *substream,
 
 	if (!clk_name)
 		return;
+	/* a pll that serves both rate families keeps the rate in use */
+	if (!IS_ERR(p_spdif->clk_src_cd) &&
+	    clk_is_match(p_spdif->sysclk, p_spdif->clk_src_cd))
+		return;
 	if (p_spdif->standard_sysclk % 11025 == 0) {
 		if (!strcmp(__clk_get_name(clk_get_parent(p_spdif->clk_spdifout)),
 				__clk_get_name(p_spdif->sysclk))) {
