@@ -249,8 +249,9 @@
 	aml_i2s2hdmi: i2s2hdmi {
 		compatible = "amlogic, g12a-snd-tdmc";
 		clocks = <&clkaudio CLKID_AUDIO_MCLK_C
-				 &clkc CLKID_MPLL2>;
-		clock-names = "mclk", "clk_srcpll";
+				 &clkc CLKID_HIFI_PLL
+				 &clkc CLKID_HIFI_PLL>;
+		clock-names = "mclk", "clk_srcpll", "clk_src_cd";
 	};
 
 	aml_tdmb: tdmb {
@@ -258,11 +259,26 @@
 	};
 
 	aml_spdif: spdif {
+		clocks = <&clkc CLKID_HIFI_PLL
+				&clkc CLKID_HIFI_PLL
+				&clkc CLKID_FCLK_DIV4
+				&clkaudio CLKID_AUDIO_SPDIFIN
+				&clkaudio CLKID_AUDIO_SPDIFOUT
+				&clkaudio CLKID_AUDIO_SPDIFIN_CTRL
+				&clkaudio CLKID_AUDIO_SPDIFOUT_CTRL>;
+		clock-names = "sysclk", "clk_src_cd", "fixed_clk", "gate_spdifin",
+				"gate_spdifout", "clk_spdifin", "clk_spdifout";
 		pinctrl-0 = <&spdifout>;
 		suspend-clk-off = <0>;
 	};
 
 	aml_spdif_b: spdif_b {
+		clocks = <&clkc CLKID_HIFI_PLL
+				&clkc CLKID_HIFI_PLL
+				&clkaudio CLKID_AUDIO_SPDIFOUTB
+				&clkaudio CLKID_AUDIO_SPDIFOUTB_CTRL>;
+		clock-names = "sysclk", "clk_src_cd",
+				"gate_spdifout", "clk_spdifout";
 		suspend-clk-off = <0>;
 	};
 };
