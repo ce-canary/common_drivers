@@ -1148,6 +1148,10 @@ unsigned int vdin_v4l2_source_height(struct vdin_dev_s *devp)
 {
 	const struct vinfo_s *vinfo = get_current_vinfo();
 
+	/* frame packing stacks the eyes with a blank between them: take the first */
+	if (vinfo->info_3d == FP_3D)
+		return vinfo->height - vinfo->vtotal / 2;
+
 	return vdin_v4l2_is_field(devp) ? vinfo->field_height : vinfo->height;
 }
 
