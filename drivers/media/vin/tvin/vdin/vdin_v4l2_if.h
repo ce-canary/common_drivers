@@ -8,7 +8,6 @@
 
 #include "vdin_drv.h"
 #include <linux/amlogic/meson_uvm_core.h>
-#define VDIN_V4L2_GET_LOOPBACK_FMT_BY_VOUT_SERVE
 
 /* the vdin scalers can not shrink by this much or more */
 #define VDIN_V4L2_MAX_SHRINK	32
