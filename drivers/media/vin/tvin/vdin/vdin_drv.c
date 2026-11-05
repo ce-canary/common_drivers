@@ -1269,6 +1269,7 @@ int vdin_start_dec(struct vdin_dev_s *devp)
 	devp->canvas_config_mode = canvas_config_mode;
 	/* h_active/v_active will be recalculated by bellow calling */
 	vdin_set_decimation(devp);
+	devp->v4l2_one_field = vdin_v4l2_is_field(devp);
 
 #ifndef CONFIG_AMLOGIC_ZAPPER_CUT
 	/* check if need enable afbce */
@@ -3778,6 +3779,12 @@ irqreturn_t vdin_v4l2_isr(int irq, void *dev_id)
 	if (devp->secure_en && !devp->mem_protected && !devp->set_canvas_manual) {
 		devp->vdin_irq_flag = VDIN_IRQ_FLG_SECURE_MD;
 		vdin_drop_frame_info(devp, "secure mode without protect mem");
+		goto irq_handled;
+	}
+
+	/* the two fields of a pair differ, so a client gets only one of them */
+	if (devp->v4l2_one_field && (devp->irq_cnt & 1)) {
+		vdin_drop_frame_info(devp, "other field");
 		goto irq_handled;
 	}
 
