@@ -4767,7 +4767,7 @@ int vdin_scaling_adjust(struct vdin_dev_s *devp)
 	if (devp->index == 0)
 		return 0;
 
-	scaling4w = rounddown(devp->prop.scaling4w, devp->canvas_align);
+	scaling4w = rounddown(devp->prop.scaling4w, 2);
 	if (devp->prop.scaling4w != scaling4w) {
 		pr_info("vdin1,%s.scaling4w=%d round down to %d\n",
 			__func__, devp->prop.scaling4w, scaling4w);
