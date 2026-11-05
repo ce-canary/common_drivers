@@ -720,8 +720,31 @@ static int vdin_vidioc_g_fmt_vid_cap_mplane(struct file *file,
 static void vdin_v4l2_bound_size(struct vdin_dev_s *devp,
 				 struct v4l2_pix_format_mplane *pix_mp)
 {
-	pix_mp->width = clamp_t(u32, rounddown(pix_mp->width, 2), 2, VDIN_4K_SIZE >> 16);
-	pix_mp->height = clamp_t(u32, rounddown(pix_mp->height, 2), 2, VDIN_4K_SIZE & 0xffff);
+	unsigned int src_w = VDIN_4K_SIZE >> 16;
+	unsigned int src_h = VDIN_4K_SIZE & 0xffff;
+	unsigned int min_w = 2;
+	unsigned int min_h = 2;
+
+	if (devp->index) {
+		src_w = get_current_vinfo()->width;
+		src_h = get_current_vinfo()->height;
+		min_w = roundup(src_w / VDIN_V4L2_MAX_SHRINK + 1, 2);
+		min_h = roundup(src_h / VDIN_V4L2_MAX_SHRINK + 1, 2);
+	}
+
+	pix_mp->width = min(pix_mp->width, src_w);
+	pix_mp->height = min(pix_mp->height, src_h);
+
+	/* a vertical scale runs through the line buffer: keep the shape */
+	if (devp->index && pix_mp->height != src_h &&
+	    pix_mp->width > devp->dtdata->vdin1_line_buff_size) {
+		pix_mp->height = pix_mp->height * devp->dtdata->vdin1_line_buff_size /
+				 pix_mp->width;
+		pix_mp->width = devp->dtdata->vdin1_line_buff_size;
+	}
+
+	pix_mp->width = max(rounddown(pix_mp->width, 2), min_w);
+	pix_mp->height = max(rounddown(pix_mp->height, 2), min_h);
 }
 
 /*
@@ -1357,6 +1380,7 @@ static int vdin_vidioc_enum_framesizes(struct file *file, void *fh,
 				  struct v4l2_frmsizeenum *fsize)
 {
 	int ret = 0, i = 0;
+	struct vdin_dev_s *devp = video_drvdata(file);
 	struct vdin_v4l2_pix_fmt *fmt = NULL;
 	struct v4l2_frmsize_discrete *frmsize = NULL;
 
@@ -1368,6 +1392,20 @@ static int vdin_vidioc_enum_framesizes(struct file *file, void *fh,
 	}
 	if (!fmt)
 		return -EINVAL;
+	if (devp->index) {
+		if (fsize->index)
+			return -EINVAL;
+		/* widths of a scaled capture; S_FMT settles the exact size */
+		fsize->type = V4L2_FRMSIZE_TYPE_STEPWISE;
+		fsize->stepwise.min_width = 2;
+		fsize->stepwise.max_width = devp->dtdata->vdin1_line_buff_size;
+		fsize->stepwise.step_width = 2;
+		fsize->stepwise.min_height = 2;
+		fsize->stepwise.max_height = VDIN_4K_SIZE & 0xffff;
+		fsize->stepwise.step_height = 2;
+		return 0;
+	}
+
 	if (fsize->index >= ARRAY_SIZE(vdin_v4l2_frmsize_dis))
 		return -EINVAL;
 
@@ -2136,7 +2174,7 @@ int vdin_v4l2_start_tvin(struct vdin_dev_s *devp)
 		vdin_cap_param.vsync_phase = 1;
 	}
 
-	/* vdin can not do scale up */
+	/* S_FMT bounds the size, unless the output mode changed since */
 	if (devp->v4l2_fmt.fmt.pix_mp.width > vdin_cap_param.h_active ||
 		devp->v4l2_fmt.fmt.pix_mp.height > vdin_cap_param.v_active) {
 		dprintk(0, "%s,out of range!v4l2_fmt:%dx%d > active:%dx%d\n",
@@ -2146,9 +2184,9 @@ int vdin_v4l2_start_tvin(struct vdin_dev_s *devp)
 		return -EINVAL;
 	}
 
-	/* the vdin scalers cannot shrink by 32 or more */
-	if (devp->v4l2_fmt.fmt.pix_mp.width * 32 <= vdin_cap_param.h_active ||
-		devp->v4l2_fmt.fmt.pix_mp.height * 32 <= vdin_cap_param.v_active) {
+	if (devp->v4l2_fmt.fmt.pix_mp.width * VDIN_V4L2_MAX_SHRINK <= vdin_cap_param.h_active ||
+	    devp->v4l2_fmt.fmt.pix_mp.height * VDIN_V4L2_MAX_SHRINK <=
+	    vdin_cap_param.v_active) {
 		dprintk(0, "%s,out of scale range!v4l2_fmt:%dx%d active:%dx%d\n",
 			__func__, devp->v4l2_fmt.fmt.pix_mp.width,
 			devp->v4l2_fmt.fmt.pix_mp.height, vdin_cap_param.h_active,
