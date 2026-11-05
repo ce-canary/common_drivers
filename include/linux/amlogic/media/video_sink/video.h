@@ -467,6 +467,7 @@ void set_video_angle(u32 s_value);
 u32 get_video_angle(void);
 u32 get_video_hold_state(void);
 bool get_vd1_vd2_mux(void);
+bool get_video_frm2fld_support(void);
 void set_vd1_vd2_mux(bool en);
 unsigned int DI_POST_REG_RD(unsigned int addr);
 int DI_POST_WR_REG_BITS(u32 adr, u32 val, u32 start, u32 len);
