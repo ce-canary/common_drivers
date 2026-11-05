@@ -1129,6 +1129,29 @@ static void vdin_scale_and_cutwin_handle(struct vdin_dev_s *devp)
 }
 
 /*
+ * Whether the vd1 or post blend input holds one field of an interlaced output.
+ * The blend runs on one field; vd1 does too unless the fields are made after it.
+ */
+bool vdin_v4l2_is_field(struct vdin_dev_s *devp)
+{
+	const struct vinfo_s *vinfo = get_current_vinfo();
+
+	if (devp->work_mode != VDIN_WORK_MD_V4L || vinfo->field_height >= vinfo->height)
+		return false;
+
+	return devp->v4l2_port_cur == TVIN_PORT_VIU1_WB0_POST_BLEND ||
+	       (devp->v4l2_port_cur == TVIN_PORT_VIU1_WB0_VD1 && !get_video_frm2fld_support());
+}
+
+/* the rows of a picture on a loopback input; vdin can not scale up */
+unsigned int vdin_v4l2_source_height(struct vdin_dev_s *devp)
+{
+	const struct vinfo_s *vinfo = get_current_vinfo();
+
+	return vdin_v4l2_is_field(devp) ? vinfo->field_height : vinfo->height;
+}
+
+/*
  * 1. config canvas base on  canvas_config_mode
  *		0: canvas_config in driver probe
  *		1: start cofigure

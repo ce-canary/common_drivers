@@ -727,7 +727,7 @@ static void vdin_v4l2_bound_size(struct vdin_dev_s *devp,
 
 	if (devp->index) {
 		src_w = get_current_vinfo()->width;
-		src_h = get_current_vinfo()->height;
+		src_h = vdin_v4l2_source_height(devp);
 		min_w = roundup(src_w / VDIN_V4L2_MAX_SHRINK + 1, 2);
 		min_h = roundup(src_h / VDIN_V4L2_MAX_SHRINK + 1, 2);
 	}
@@ -2124,7 +2124,7 @@ int vdin_v4l2_start_tvin(struct vdin_dev_s *devp)
 	if (devp->index) {
 		devp->parm.info.fmt = TVIN_SIG_FMT_MAX;
 		loopback_fmt.h_active = get_current_vinfo()->width;
-		loopback_fmt.v_active = get_current_vinfo()->height;
+		loopback_fmt.v_active = vdin_v4l2_source_height(devp);
 		fmt_info_p = &loopback_fmt;
 	} else {
 		fmt_info_p = tvin_get_fmt_info(devp->parm.info.fmt);
