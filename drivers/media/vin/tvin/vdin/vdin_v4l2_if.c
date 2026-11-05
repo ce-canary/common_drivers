@@ -2075,61 +2075,25 @@ v4l2_device_register_fail:
 	return ret;
 }
 
-/* Check loopback source format */
-int vdin_v4l2_loopback_fmt(struct vdin_dev_s *devp)
-{
-	int h, v;
-	int err_range = 10;
-	const struct vinfo_s *vinfo;
-
-	dprintk(1, "%s,fmt:%s,cfmt:%s,status:%#x,fps:%d\n",
-		__func__, tvin_sig_fmt_str(devp->parm.info.fmt),
-		tvin_color_fmt_str(devp->parm.info.cfmt),
-		devp->parm.info.status, devp->parm.info.fps);
-#ifdef VDIN_V4L2_GET_LOOPBACK_FMT_BY_VOUT_SERVE
-	vinfo = get_current_vinfo();
-	h = vinfo->width;
-	v = vinfo->height;
-	dprintk(1, "%s,%d; %dx%d,vmode:%d\n", __func__, __LINE__,
-		vinfo->width, vinfo->height, vinfo->mode);
-#else
-	h = vdin_get_active_h(devp);
-	v = vdin_get_active_v(devp);
-	dprintk(1, "%s,%d; %dx%d\n", __func__, __LINE__, vinfo->width, vinfo->height);
-#endif
-	if (h >= 4096 - err_range && h <= 4096 + err_range &&
-		v >= 2160 - err_range && v <= 2160 + err_range)
-		devp->parm.info.fmt = TVIN_SIG_FMT_HDMI_4096_2160_00HZ;
-	else if (h >= 3840 - err_range && h <= 3840 + err_range &&
-			 v >= 2160 - err_range && v <= 2160 + err_range)
-		devp->parm.info.fmt = TVIN_SIG_FMT_HDMI_3840_2160_00HZ;
-	else if (h >= 1920 - err_range && h <= 1920 + err_range &&
-			 v >= 1080 - err_range && v <= 1080 + err_range)
-		devp->parm.info.fmt = TVIN_SIG_FMT_HDMI_1920X1080P_60HZ;
-	else if (h >= 1280 - err_range && h <= 1280 + err_range &&
-			 v >= 720 - err_range && v <= 720 + err_range)
-		devp->parm.info.fmt = TVIN_SIG_FMT_HDMI_1280X720P_60HZ;
-	else
-		devp->parm.info.fmt = TVIN_SIG_FMT_NULL;
-
-	dprintk(1, "vdin%d,active,h=%d,v=%d\n", devp->index, h, v);
-
-	return 0;
-}
-
 /* start vdin dec for v4l2 */
 int vdin_v4l2_start_tvin(struct vdin_dev_s *devp)
 {
 	int ret;
 	struct vdin_parm_s vdin_cap_param;
 	const struct tvin_format_s *fmt_info_p;
+	struct tvin_format_s loopback_fmt = {};
 
-	/* TODO:get vd1/osd loopback source fmt */
-	if (devp->index)
-		vdin_v4l2_loopback_fmt(devp);
+	/* a loopback input is the size of the output mode */
+	if (devp->index) {
+		devp->parm.info.fmt = TVIN_SIG_FMT_MAX;
+		loopback_fmt.h_active = get_current_vinfo()->width;
+		loopback_fmt.v_active = get_current_vinfo()->height;
+		fmt_info_p = &loopback_fmt;
+	} else {
+		fmt_info_p = tvin_get_fmt_info(devp->parm.info.fmt);
+	}
 
 	/* Check args */
-	fmt_info_p = tvin_get_fmt_info(devp->parm.info.fmt);
 	if (!fmt_info_p) {
 		dprintk(0, "%s,invalid fmt:%s\n",
 			__func__, tvin_sig_fmt_str(devp->parm.info.fmt));
