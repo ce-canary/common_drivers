@@ -9,6 +9,9 @@
 #include "vdin_drv.h"
 #include <linux/amlogic/meson_uvm_core.h>
 
+/* the vdin scalers can not shrink by this much or more */
+#define VDIN_V4L2_MAX_SHRINK	32
+
 #define VDIN_DEV_VER		0x20240116
 #define VDIN_DEV_VER2		"v4l2 base func ok"
 #define VDIN_V4L_DV_NAME	"vdin_video"
