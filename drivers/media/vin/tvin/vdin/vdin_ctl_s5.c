@@ -1387,7 +1387,8 @@ vdin_set_color_matrix_s5(enum vdin_matrix_sel_e matrix_sel, unsigned int offset,
 	case VDIN_FORMAT_CONVERT_YUV_YUV444:
 	case VDIN_FORMAT_CONVERT_YUV_NV12:
 	case VDIN_FORMAT_CONVERT_YUV_NV21:
-		if ((fmt_info->scan_mode == TVIN_SCAN_MODE_PROGRESSIVE &&
+		if (IS_LOOPBACK_SRC(port) ||
+		    (fmt_info->scan_mode == TVIN_SCAN_MODE_PROGRESSIVE &&
 		     fmt_info->v_active >= 720) || /* 720p & above */
 		    (fmt_info->scan_mode == TVIN_SCAN_MODE_INTERLACED &&
 		     fmt_info->v_active >= 540)) { /* 1080i & above */
