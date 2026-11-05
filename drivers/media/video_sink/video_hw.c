@@ -1009,6 +1009,12 @@ struct video_dev_s *get_video_cur_dev(void)
 	return cur_dev;
 }
 
+bool get_video_frm2fld_support(void)
+{
+	return cur_dev->frm2fld_support;
+}
+EXPORT_SYMBOL(get_video_frm2fld_support);
+
 u32 get_video_enabled(u8 layer_id)
 {
 	u32 global_output = 0;
