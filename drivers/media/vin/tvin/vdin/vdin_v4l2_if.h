@@ -8,7 +8,6 @@
 
 #include "vdin_drv.h"
 #include <linux/amlogic/meson_uvm_core.h>
-#define VDIN_V4L2_GET_LOOPBACK_FMT_BY_VOUT_SERVE
 
 #define VDIN_DEV_VER		0x20240116
 #define VDIN_DEV_VER2		"v4l2 base func ok"
