@@ -367,6 +367,9 @@ struct match_data_s {
 		 (((src_) >= TVIN_PORT_HDMI0) && \
 		 ((src_) < TVIN_PORT_HDMI_MAX)); })
 
+#define IS_LOOPBACK_SRC(src)	\
+		((src) >= TVIN_PORT_VIU1_WB0_VD1 && (src) <= TVIN_PORT_VIU1_WB1_POST_BLEND)
+
 #define IS_CVBS_SRC(src)	\
 		({typeof(src) src_ = src; \
 		 (((src_) >= TVIN_PORT_CVBS0) && \
