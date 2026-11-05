@@ -806,6 +806,7 @@ struct vdin_dev_s {
 	struct device *dev;
 	struct tvin_parm_s parm;
 	struct tvin_format_s *fmt_info_p;
+	struct tvin_format_s free_size_fmt;
 	struct vf_pool *vfp;
 	struct tvin_frontend_s *frontend;
 	struct tvin_frontend_s	vdin_frontend;
