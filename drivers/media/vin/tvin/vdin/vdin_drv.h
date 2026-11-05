@@ -1054,6 +1054,8 @@ struct vdin_dev_s {
 	/*use frame rate to cal duration*/
 	unsigned int use_frame_rate;
 	unsigned int irq_cnt;
+	/* v4l2 capture of a field: deliver one field of each pair */
+	bool v4l2_one_field;
 	unsigned int vpu_crash_cnt;
 	unsigned int frame_cnt;
 	unsigned int vdin_drop_num;
