@@ -1876,13 +1876,7 @@ int start_tvin_service(int no, struct vdin_parm_s  *para)
 	fmt = devp->parm.info.fmt;
 	/* add for camera random resolution */
 	if (para->fmt >= TVIN_SIG_FMT_MAX) {
-		devp->fmt_info_p = kmalloc(sizeof(*devp->fmt_info_p),
-					   GFP_KERNEL);
-		if (!devp->fmt_info_p) {
-			pr_err("[vdin]%s kmalloc error.\n", __func__);
-			mutex_unlock(&devp->fe_lock);
-			return -ENOMEM;
-		}
+		devp->fmt_info_p = &devp->free_size_fmt;
 		devp->fmt_info_p->hs_bp     = para->hs_bp;
 		devp->fmt_info_p->vs_bp     = para->vs_bp;
 		devp->fmt_info_p->hs_pol    = para->hsync_phase;
@@ -2095,9 +2089,6 @@ int stop_tvin_service(int no)
 			devp->frontend->dec_ops->close(devp->frontend, devp->port_type);
 	}
 	vdin_stop_dec(devp);
-	/*free the memory allocated in start tvin service*/
-	if (devp->parm.info.fmt >= TVIN_SIG_FMT_MAX)
-		kfree(devp->fmt_info_p);
 /* #ifdef CONFIG_ARCH_MESON6 */
 /* switch_mod_gate_by_name("vdin", 0); */
 /* #endif */
