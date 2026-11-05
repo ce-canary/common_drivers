@@ -2921,6 +2921,16 @@ static bool vdin_is_input_valid(struct vdin_dev_s *devp)
 	return true;
 }
 
+/* a blank input reports no lines, whatever the cut, the scaling or the field */
+static bool vdin_is_v4l2_input_blank(struct vdin_dev_s *devp)
+{
+	if (!devp->index || devp->work_mode != VDIN_WORK_MD_V4L)
+		return false;
+
+	return vdin_get_active_h(devp) <= devp->vdin_input_data_threshold ||
+	       vdin_get_active_v(devp) <= devp->vdin_input_data_threshold;
+}
+
 static bool vdin_isneed_pcs_reset(struct vdin_dev_s *devp)
 {
 	struct tvin_state_machine_ops_s *sm_ops = NULL;
@@ -3705,6 +3715,7 @@ irqreturn_t vdin_v4l2_isr(int irq, void *dev_id)
 	int ret = 0;
 	unsigned int offset;
 	unsigned int protect_mode;
+	bool blank;
 
 	if (!devp)
 		return IRQ_HANDLED;
@@ -3732,9 +3743,13 @@ irqreturn_t vdin_v4l2_isr(int irq, void *dev_id)
 		goto irq_handled;
 	}
 
-	if (!vdin_is_input_valid(devp) &&
-		(devp->vdin_function_sel & VDIN_NOT_DATA_INPUT_DROP)) {
+	blank = vdin_is_v4l2_input_blank(devp);
+	if ((!vdin_is_input_valid(devp) &&
+	     (devp->vdin_function_sel & VDIN_NOT_DATA_INPUT_DROP)) || blank) {
 		devp->vdin_irq_flag = VDIN_IRQ_FLG_FAKE_IRQ;
+		/* the frame held across the gap is not checked, so it is not put */
+		if (blank)
+			devp->chg_drop_frame_cnt = 1;
 		vdin_drop_frame_info(devp, "no data input");
 		if (vdin_dbg_en & 0x10)
 			devp->frame_drop_num = 6;
