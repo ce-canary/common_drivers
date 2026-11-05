@@ -1436,6 +1436,15 @@ static int vdin_vidioc_enum_frameintervals(struct file *file, void *priv,
 static int vdin_vidioc_g_parm(struct file *file, void *priv,
 			 struct v4l2_streamparm *parms)
 {
+	struct vdin_dev_s *devp = video_drvdata(file);
+	const struct vinfo_s *vinfo = get_current_vinfo();
+	struct v4l2_fract *period = &parms->parm.capture.timeperframe;
+
+	period->numerator = vinfo->sync_duration_den;
+	period->denominator = vinfo->sync_duration_num;
+	if (vdin_v4l2_is_field(devp))
+		period->numerator *= 2;
+
 	return 0;
 }
 
