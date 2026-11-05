@@ -174,3 +174,9 @@
 	/delete-property/ tocodec_inout;
 	/delete-property/ tdmout_index;
 };
+
+&vdin1 {
+	/* VD1, VD2, VD3, OSD1, OSD2, VPP, POST_BLEND; the driver holds 7 */
+	fe_ports = <0x0000a002 0x0000a003 0x0000a004 0x0000a005
+		    0x0000a006 0x0000a008 0x0000a009>;
+};
