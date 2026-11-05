@@ -247,16 +247,18 @@ void vdin_fill_pix_format(struct vdin_dev_s *devp)
 
 	if (v4l2_fmt->fmt.pix_mp.num_planes == 1) {
 		if (v4l2_fmt->fmt.pix_mp.pixelformat == V4L2_PIX_FMT_UYVY) {
-			v4l2_fmt->fmt.pix_mp.plane_fmt[0].sizeimage =
-				v4l2_fmt->fmt.pix_mp.width * v4l2_fmt->fmt.pix_mp.height * 2;
 			v4l2_fmt->fmt.pix_mp.plane_fmt[0].bytesperline =
-				(v4l2_fmt->fmt.pix_mp.width * 16) >> 3;
+				roundup(v4l2_fmt->fmt.pix_mp.width * 2, devp->canvas_align);
+			v4l2_fmt->fmt.pix_mp.plane_fmt[0].sizeimage =
+				v4l2_fmt->fmt.pix_mp.plane_fmt[0].bytesperline *
+				v4l2_fmt->fmt.pix_mp.height;
 		} else if (v4l2_fmt->fmt.pix_mp.pixelformat == V4L2_PIX_FMT_NV12 ||
 				   v4l2_fmt->fmt.pix_mp.pixelformat == V4L2_PIX_FMT_NV21) {
-			v4l2_fmt->fmt.pix_mp.plane_fmt[0].sizeimage =
-				v4l2_fmt->fmt.pix_mp.width * v4l2_fmt->fmt.pix_mp.height * 3 / 2;
 			v4l2_fmt->fmt.pix_mp.plane_fmt[0].bytesperline =
-				(v4l2_fmt->fmt.pix_mp.width * 12) >> 3;
+				roundup(v4l2_fmt->fmt.pix_mp.width, devp->canvas_align);
+			v4l2_fmt->fmt.pix_mp.plane_fmt[0].sizeimage =
+				v4l2_fmt->fmt.pix_mp.plane_fmt[0].bytesperline *
+				v4l2_fmt->fmt.pix_mp.height * 3 / 2;
 		} else if (v4l2_fmt->fmt.pix_mp.pixelformat == V4L2_PIX_FMT_AML_YUV422_10P) {
 			v4l2_fmt->fmt.pix_mp.plane_fmt[0].bytesperline =
 				roundup(v4l2_fmt->fmt.pix_mp.width * 5 / 2, devp->canvas_align);
@@ -267,26 +269,24 @@ void vdin_fill_pix_format(struct vdin_dev_s *devp)
 		v4l2_fmt->fmt.pix_mp.plane_fmt[1].sizeimage = 0;
 		v4l2_fmt->fmt.pix_mp.plane_fmt[1].bytesperline = 0;
 	} else if (v4l2_fmt->fmt.pix_mp.num_planes == 2) {
+		unsigned int stride = roundup(v4l2_fmt->fmt.pix_mp.width, devp->canvas_align);
+
 		if (v4l2_fmt->fmt.pix_mp.pixelformat == V4L2_PIX_FMT_NV16M ||
 			v4l2_fmt->fmt.pix_mp.pixelformat == V4L2_PIX_FMT_NV61M) {
+			v4l2_fmt->fmt.pix_mp.plane_fmt[0].bytesperline = stride;
+			v4l2_fmt->fmt.pix_mp.plane_fmt[1].bytesperline = stride;
 			v4l2_fmt->fmt.pix_mp.plane_fmt[0].sizeimage =
-				v4l2_fmt->fmt.pix_mp.width * v4l2_fmt->fmt.pix_mp.height;
+				stride * v4l2_fmt->fmt.pix_mp.height;
 			v4l2_fmt->fmt.pix_mp.plane_fmt[1].sizeimage =
-				v4l2_fmt->fmt.pix_mp.width * v4l2_fmt->fmt.pix_mp.height;
-			v4l2_fmt->fmt.pix_mp.plane_fmt[0].bytesperline =
-				v4l2_fmt->fmt.pix_mp.width;
-			v4l2_fmt->fmt.pix_mp.plane_fmt[1].bytesperline =
-				v4l2_fmt->fmt.pix_mp.width;
+				stride * v4l2_fmt->fmt.pix_mp.height;
 		} else if (v4l2_fmt->fmt.pix_mp.pixelformat == V4L2_PIX_FMT_NV12M ||
 				   v4l2_fmt->fmt.pix_mp.pixelformat == V4L2_PIX_FMT_NV21M) {
+			v4l2_fmt->fmt.pix_mp.plane_fmt[0].bytesperline = stride;
+			v4l2_fmt->fmt.pix_mp.plane_fmt[1].bytesperline = stride;
 			v4l2_fmt->fmt.pix_mp.plane_fmt[0].sizeimage =
-				v4l2_fmt->fmt.pix_mp.width * v4l2_fmt->fmt.pix_mp.height;
+				stride * v4l2_fmt->fmt.pix_mp.height;
 			v4l2_fmt->fmt.pix_mp.plane_fmt[1].sizeimage =
-				v4l2_fmt->fmt.pix_mp.width * v4l2_fmt->fmt.pix_mp.height / 2;
-			v4l2_fmt->fmt.pix_mp.plane_fmt[0].bytesperline =
-				v4l2_fmt->fmt.pix_mp.width;
-			v4l2_fmt->fmt.pix_mp.plane_fmt[1].bytesperline =
-				v4l2_fmt->fmt.pix_mp.width / 2;
+				stride * v4l2_fmt->fmt.pix_mp.height / 2;
 		}
 	} else {
 		dprintk(0, "vdin%d,err.not support num_planes=%d\n ",
@@ -720,8 +720,7 @@ static int vdin_vidioc_g_fmt_vid_cap_mplane(struct file *file,
 static void vdin_v4l2_bound_size(struct vdin_dev_s *devp,
 				 struct v4l2_pix_format_mplane *pix_mp)
 {
-	pix_mp->width = clamp_t(u32, rounddown(pix_mp->width, devp->canvas_align),
-				devp->canvas_align, VDIN_4K_SIZE >> 16);
+	pix_mp->width = clamp_t(u32, rounddown(pix_mp->width, 2), 2, VDIN_4K_SIZE >> 16);
 	pix_mp->height = clamp_t(u32, rounddown(pix_mp->height, 2), 2, VDIN_4K_SIZE & 0xffff);
 }
 
