@@ -1545,6 +1545,10 @@ void vdin_stop_dec(struct vdin_dev_s *devp)
 		return;
 	}
 
+	/* a client must not wait on frames of a stream stopped outside v4l2 */
+	if (devp->work_mode == VDIN_WORK_MD_V4L && vb2_start_streaming_called(&devp->vb_queue))
+		vb2_queue_error(&devp->vb_queue);
+
 	if (devp->index == 0 && devp->dtdata->vdin0_en == 0) {
 		pr_err("%s vdin%d not enable\n", __func__, devp->index);
 		return;
