@@ -416,12 +416,9 @@ static int vdin_vidioc_reqbufs(struct file *file, void *priv,
 			reqbufs->type, reqbufs->count);
 		//return 0;
 	}
-	if (reqbufs->count && (reqbufs->count < devp->vb_queue.min_buffers_needed ||
-		reqbufs->count > VDIN_CANVAS_MAX_CNT)) {
-		dprintk(0, "%s err,count=%d,out of range[%d,%d]\n", __func__,
-			reqbufs->count, devp->vb_queue.min_buffers_needed, VDIN_CANVAS_MAX_CNT);
-		return -EINVAL;
-	}
+	if (reqbufs->count)
+		reqbufs->count = clamp_t(u32, reqbufs->count, devp->vb_queue.min_buffers_needed,
+					 VDIN_CANVAS_MAX_CNT);
 
 	dprintk(1, "%s memory:%d,type:%d buff_num:%d\n", __func__,
 		reqbufs->memory, reqbufs->type, reqbufs->count);
