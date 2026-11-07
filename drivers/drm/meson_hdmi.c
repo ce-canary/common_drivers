@@ -286,12 +286,25 @@ static bool meson_hdmitx_test_color_attr(struct hdmitx_common *common,
 		return true;
 }
 
-static bool is_amdv_output_dv(void)
+static bool is_amdv_output_dv(const struct drm_display_mode *drm_mode)
 {
-	int mode = get_amdv_target_mode();
+	bool interlaced = drm_mode->flags & DRM_MODE_FLAG_INTERLACE;
+	struct vout_device_s dev = { .dv_info = hdmitx_common_get_dv_info() };
+	struct vinfo_s next = {
+		.name = (char *)drm_mode->name,
+		.height = drm_mode->vdisplay,
+		.field_height = interlaced ? drm_mode->vdisplay / 2 : drm_mode->vdisplay,
+		.hdr_info = *hdmitx_common_get_hdr_info(),
+		.vout_device = &dev,
+	};
+	int mode;
 
-	return is_amdv_enable() &&
-	       mode != AMDV_OUTPUT_MODE_HDR10 &&
+	if (!is_amdv_enable())
+		return false;
+
+	mode = get_amdv_mode_for(&next);
+
+	return mode != AMDV_OUTPUT_MODE_HDR10 &&
 	       mode != AMDV_OUTPUT_MODE_SDR10 &&
 	       mode != AMDV_OUTPUT_MODE_SDR8;
 }
@@ -305,6 +318,7 @@ static int meson_hdmitx_decide_color_attr
 	enum hdmi_vic vic;
 	char* colour_sampling[] = {"RGB","YUV422","YUV444","YUV420"};
 	struct hdmitx_color_attr fmt_attr = {};
+	bool dv_output = is_amdv_output_dv(&crtc_state->base.adjusted_mode);
 
 	if (!outputmode) {
 		DRM_ERROR("%s current mode empty.\n", __func__);
@@ -329,7 +343,7 @@ static int meson_hdmitx_decide_color_attr
 	// try autoselect
 	// check if any colour subsampling is set
 	// force colour subsampling when DV mode
-	if (is_amdv_output_dv()) {
+	if (dv_output) {
 		int cs = attr->colorformat;
 		if (get_amdv_ll_policy() == 0 /* DOLBY_VISION_LL_DISABLE */) {
 			attr->colorformat = HDMI_COLORSPACE_YUV444;
@@ -372,7 +386,7 @@ static int meson_hdmitx_decide_color_attr
 
 	// check for bit colourdepth limit
 	// force bit colourdepth when DV mode
-	if (is_amdv_output_dv()) {
+	if (dv_output) {
 		int cd = bitdepth_to_colordepth(attr->bitdepth);
 		if (get_amdv_ll_policy() == 0 /* DOLBY_VISION_LL_DISABLE */) {
 			attr->bitdepth = colordepth_to_bitdepth(COLORDEPTH_24B);

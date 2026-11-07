@@ -163,6 +163,7 @@ bool for_amdv_certification(void);
 void set_amdv_mode(int mode);
 int get_amdv_mode(void);
 int get_amdv_target_mode(void);
+int get_amdv_mode_for(const struct vinfo_s *vinfo);
 void amdv_set_toggle_flag(int flag);
 int amdv_wait_metadata(struct vframe_s *vf, enum vd_path_e vd_path);
 int amdv_pop_metadata(void);
