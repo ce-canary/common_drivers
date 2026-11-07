@@ -2624,8 +2624,10 @@ EXPORT_SYMBOL(dv_inst_map);
 
 void dv_inst_unmap(int inst)
 {
-	if (!multi_dv_mode)
+	if (!multi_dv_mode) {
+		amdv_src_format = 0;
 		return;
+	}
 
 	pr_info("%s %d\n", __func__, inst);
 
@@ -2634,6 +2636,7 @@ void dv_inst_unmap(int inst)
 	if (dv_inst_valid(inst) && dv_inst[inst].mapped) {
 		dv_inst[inst].mapped = false;
 		last_unmap_id = inst;
+		dv_inst[inst].amdv_src_format = 0;
 		{
 			void *parser = rcu_dereference_protected
 				(dv_inst[inst].metadata_parser,
@@ -8429,7 +8432,8 @@ int amdv_parse_metadata_v1(struct vframe_s *vf,
 
 	check_format = src_format;
 	if (vf) {
-		update_src_format(check_format, vf);
+		if (toggle_mode != 2)
+			update_src_format(check_format, vf);
 		last_current_format = check_format;
 	}
 
@@ -10233,7 +10237,8 @@ int amdv_parse_metadata_v2_stb(struct vframe_s *vf,
 
 	check_format = src_format;
 	if (vf) {
-		update_src_format(check_format, vf);
+		if (toggle_mode != 2)
+			update_src_format(check_format, vf);
 		last_current_format = check_format;
 	}
 
@@ -14075,6 +14080,17 @@ int get_amdv_target_mode(void)
 	return amdv_target_mode;
 }
 EXPORT_SYMBOL(get_amdv_target_mode);
+
+/* the output the policy would pick for the mode in @vinfo, for the current source */
+int get_amdv_mode_for(const struct vinfo_s *vinfo)
+{
+	int mode = READ_ONCE(dolby_vision_mode);
+
+	/* userspace enables the engine only for a DV source or a forced output */
+	amdv_policy_process_for(NULL, &mode, cur_src_format_or(FORMAT_DOVI), vinfo);
+	return mode;
+}
+EXPORT_SYMBOL(get_amdv_mode_for);
 
 bool is_amdv_enable(void)
 {
