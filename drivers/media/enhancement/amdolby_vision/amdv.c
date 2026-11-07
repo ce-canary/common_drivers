@@ -3759,16 +3759,19 @@ int get_amdv_src_format(enum vd_path_e vd_path)
 }
 EXPORT_SYMBOL(get_amdv_src_format);
 
-static enum signal_format_enum get_cur_src_format(void)
+static enum signal_format_enum cur_src_format_or(enum signal_format_enum unknown)
 {
-	int cur_format = amdv_src_format;
+	int cur_format = READ_ONCE(amdv_src_format);
 	enum signal_format_enum ret = FORMAT_SDR;
 	int dv_id = pri_input; /*pri input as default*/
 
 	if (multi_dv_mode)
-		cur_format = dv_inst[dv_id].amdv_src_format;
+		cur_format = READ_ONCE(dv_inst[dv_id].amdv_src_format);
 	else if (is_aml_hw5())
 		return top2_v_info.amdv_src_format;
+
+	if (!cur_format)
+		return unknown;
 
 	switch (cur_format) {
 	case 1: /* HDR10 */
@@ -3802,10 +3805,15 @@ static enum signal_format_enum get_cur_src_format(void)
 	return ret;
 }
 
-static int amdv_policy_process_v1(struct vframe_s *vf,
-				int *mode, enum signal_format_enum src_format)
+static enum signal_format_enum get_cur_src_format(void)
 {
-	const struct vinfo_s *vinfo;
+	return cur_src_format_or(FORMAT_SDR);
+}
+
+static int amdv_policy_process_v1(struct vframe_s *vf,
+				int *mode, enum signal_format_enum src_format,
+				const struct vinfo_s *vinfo)
+{
 	int mode_change = 0;
 	int h = 0;
 	int w = 0;
@@ -3965,7 +3973,6 @@ static int amdv_policy_process_v1(struct vframe_s *vf,
 		}
 	}
 
-	vinfo = get_current_vinfo();
 	if (src_format == FORMAT_MVC) {
 		if (dolby_vision_mode !=
 			AMDV_OUTPUT_MODE_BYPASS) {
@@ -4331,9 +4338,9 @@ static int amdv_policy_process_v2_tv(int *mode,
 }
 
 static int amdv_policy_process_v2_stb(struct vframe_s *vf,
-				int *mode, enum signal_format_enum src_format)
+				int *mode, enum signal_format_enum src_format,
+				const struct vinfo_s *vinfo)
 {
-	const struct vinfo_s *vinfo;
 	int mode_change = 0;
 	int h = 0;
 	int w = 0;
@@ -4369,7 +4376,6 @@ static int amdv_policy_process_v2_stb(struct vframe_s *vf,
 		}
 	}
 
-	vinfo = get_current_vinfo();
 	if (src_format == FORMAT_MVC) {
 		if (dolby_vision_mode !=
 			AMDV_OUTPUT_MODE_BYPASS) {
@@ -4799,8 +4805,9 @@ static int amdv_policy_process_v2_stb(struct vframe_s *vf,
 	return mode_change;
 }
 
-int amdv_policy_process(struct vframe_s *vf, int *mode,
-			enum signal_format_enum src_format)
+static int amdv_policy_process_for(struct vframe_s *vf, int *mode,
+				   enum signal_format_enum src_format,
+				   const struct vinfo_s *vinfo)
 {
 	int mode_change = 0;
 
@@ -4817,11 +4824,17 @@ int amdv_policy_process(struct vframe_s *vf, int *mode,
 		if (is_aml_tvmode())
 			mode_change = amdv_policy_process_v2_tv(mode, src_format);
 		else
-			mode_change = amdv_policy_process_v2_stb(vf, mode, src_format);
+			mode_change = amdv_policy_process_v2_stb(vf, mode, src_format, vinfo);
 	} else {
-		mode_change = amdv_policy_process_v1(vf, mode, src_format);
+		mode_change = amdv_policy_process_v1(vf, mode, src_format, vinfo);
 	}
 	return mode_change;
+}
+
+int amdv_policy_process(struct vframe_s *vf, int *mode,
+			enum signal_format_enum src_format)
+{
+	return amdv_policy_process_for(vf, mode, src_format, get_current_vinfo());
 }
 
 /* dv provider of each video layer*/
