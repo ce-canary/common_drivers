@@ -216,7 +216,7 @@ static void build_hdmitx_attr_str(char *attr_str, u32 format, u32 bit_depth)
 }
 
 static struct hdmitx_color_attr *meson_hdmitx_get_candidate_attr_list
-	(struct am_meson_crtc_state *crtc_state)
+	(struct am_meson_crtc_state *crtc_state, u8 eotf_type)
 {
 	const char *outputmode = crtc_state->base.adjusted_mode.name;
 	struct hdmitx_color_attr *attr_list = NULL;
@@ -226,11 +226,11 @@ static struct hdmitx_color_attr *meson_hdmitx_get_candidate_attr_list
 		hdr_status = am_hdmi_info.hdmitx_dev->get_hdmi_hdr_status();
 
 	/* filter some color value options, aimed at some modes. */
-	if (crtc_state->crtc_eotf_type ==
+	if (eotf_type ==
 			HDMI_EOTF_MESON_DOLBYVISION ||
 			hdr_status == dolbyvision_std) {
 		attr_list = dv_color_attr_list;
-	} else if (crtc_state->crtc_eotf_type ==
+	} else if (eotf_type ==
 			HDMI_EOTF_MESON_DOLBYVISION_LL ||
 			hdr_status == dolbyvision_lowlatency) {
 		attr_list = dv_ll_color_attr_list;
@@ -247,7 +247,7 @@ static struct hdmitx_color_attr *meson_hdmitx_get_candidate_attr_list
 }
 
 static bool meson_hdmitx_test_color_attr(struct hdmitx_common *common,
-	struct am_meson_crtc_state *crtc_state,
+	struct am_meson_crtc_state *crtc_state, u8 eotf_type,
 	struct hdmitx_color_attr *test_attr, u64 sequence_id)
 {
 	struct hdmitx_common_state comm_state;
@@ -258,7 +258,7 @@ static bool meson_hdmitx_test_color_attr(struct hdmitx_common *common,
 	if (test_attr->colorformat == HDMI_COLORSPACE_RESERVED6)
 		return false;
 
-	attr_list = meson_hdmitx_get_candidate_attr_list(crtc_state);
+	attr_list = meson_hdmitx_get_candidate_attr_list(crtc_state, eotf_type);
 
 	do {
 		if (attr_list->colorformat == HDMI_COLORSPACE_RESERVED6)
@@ -284,6 +284,23 @@ static bool meson_hdmitx_test_color_attr(struct hdmitx_common *common,
 		return false;
 	else
 		return true;
+}
+
+/* validate @attr for the mode of @crtc_state as the encoder check does off the android path */
+static bool meson_hdmitx_attr_valid(struct hdmitx_common *common,
+	struct am_meson_crtc_state *crtc_state,
+	struct hdmitx_color_attr *attr, u64 sequence_id)
+{
+	struct hdmitx_common_state comm_state;
+	char attr_str[HDMITX_ATTR_LEN_MAX];
+
+	memset(&comm_state, 0, sizeof(comm_state));
+	comm_state.state_sequence_id = sequence_id;
+	build_hdmitx_attr_str(attr_str, attr->colorformat, attr->bitdepth);
+
+	return !hdmitx_common_validate_mode_locked(common, &comm_state,
+						   crtc_state->base.adjusted_mode.name,
+						   attr_str, crtc_state->valid_brr, false);
 }
 
 static bool is_amdv_output_dv(const struct drm_display_mode *drm_mode)
@@ -1146,6 +1163,10 @@ static void am_hdmitx_connector_destroy(struct drm_connector *connector)
 	drm_property_blob_put(am_hdmitx->edid_raw_blob);
 }
 
+static void meson_hdmitx_modeset_color_attr(struct hdmitx_common *common,
+	struct am_meson_crtc_state *crtc_state,
+	struct hdmitx_color_attr *attr, u64 sequence_id);
+
 int meson_hdmitx_atomic_check(struct drm_connector *connector,
 	struct drm_atomic_state *state)
 {
@@ -1209,6 +1230,36 @@ int meson_hdmitx_atomic_check(struct drm_connector *connector,
 		if (new_hdmitx_state->frac_rate_policy !=
 				old_hdmitx_state->frac_rate_policy) {
 			new_crtc_state->mode_changed = true;
+		}
+	}
+
+	/*
+	 * A same-mode commit still needs a modeset when a modeset would pick
+	 * other attrs. Flag it without allow_modeset too, so that a test
+	 * commit gets the answer. Only an attr that validates for this mode is
+	 * flagged, so the flag cannot fail a commit that would pass without it.
+	 */
+	if (new_crtc_state && new_crtc_state->active &&
+	    !drm_atomic_crtc_needs_modeset(new_crtc_state) &&
+	    !new_hdmitx_state->color_force &&
+	    !meson_crtc_state->uboot_mode_init &&
+	    !am_hdmi_info.android_path) {
+		struct hdmitx_common *common = am_hdmi_info.hdmitx_dev->hdmitx_common;
+		struct hdmitx_color_attr attr = new_hdmitx_state->color_attr_para;
+
+		if (!strstr(new_crtc_state->adjusted_mode.name, "dummy") &&
+		    hdmitx_get_hpd_state(common)) {
+			meson_hdmitx_modeset_color_attr(common, meson_crtc_state, &attr,
+				new_hdmitx_state->hcs.state_sequence_id);
+			if ((attr.colorformat !=
+				old_hdmitx_state->color_attr_para.colorformat ||
+				attr.bitdepth !=
+				old_hdmitx_state->color_attr_para.bitdepth) &&
+			    meson_hdmitx_attr_valid(common, meson_crtc_state, &attr,
+				new_hdmitx_state->hcs.state_sequence_id)) {
+				new_crtc_state->mode_changed = true;
+				meson_crtc_state->attr_changed = true;
+			}
 		}
 	}
 
@@ -1680,30 +1731,24 @@ static int meson_hdmitx_update_hdr_eotf(struct drm_display_mode *mode,
 	return -ENODEV;
 }
 
-static int meson_hdmitx_decide_eotf_type
-	(struct am_meson_crtc_state *meson_crtc_state,
-	struct am_hdmitx_connector_state *hdmitx_state)
+static u8 meson_hdmitx_get_eotf_type
+	(struct am_meson_crtc_state *meson_crtc_state)
 {
 	struct hdmitx_common *tx_comm = am_hdmi_info.hdmitx_dev->hdmitx_common;
 	u8 crtc_eotf_type = HDMI_EOTF_TRADITIONAL_GAMMA_SDR;
 	int ret = 0;
 	struct drm_display_mode *mode = &meson_crtc_state->base.adjusted_mode;
 
-	/*If the HDMI cable is not plugin before starting the board,pref_hdr_policy
-	 *may not be available in am_meson_update_output_state() function
-	 */
-	hdmitx_state->pref_hdr_policy = tx_comm->hdr_priority;
-
 	/* TODO:hdr priority handled by hdmitx, and dont support dynamic set.
 	 * Currently checking is to confirm crtc_eotf_type == dv/dv_ll mode,
 	 * we need special setting for dv.
 	 */
-	if (hdmitx_state->pref_hdr_policy == MESON_PREF_DV) {
+	if (tx_comm->hdr_priority == MESON_PREF_DV) {
 		if (meson_crtc_state->dv_mode)
 			crtc_eotf_type = HDMI_EOTF_MESON_DOLBYVISION_LL;
 		else
 			crtc_eotf_type = HDMI_EOTF_MESON_DOLBYVISION;
-	} else if (hdmitx_state->pref_hdr_policy == MESON_PREF_HDR) {
+	} else if (tx_comm->hdr_priority == MESON_PREF_HDR) {
 		crtc_eotf_type = HDMI_EOTF_SMPTE_ST2084;
 	} else {
 		crtc_eotf_type = HDMI_EOTF_TRADITIONAL_GAMMA_SDR;
@@ -1751,16 +1796,53 @@ static int meson_hdmitx_decide_eotf_type
 			__func__, crtc_eotf_type);
 	}
 
-	if (!meson_crtc_state->crtc_eotf_by_property_flag)
-		meson_crtc_state->crtc_eotf_type = crtc_eotf_type;
-	else
-		meson_crtc_state->crtc_eotf_type = meson_crtc_state->eotf_type_by_property;
+	if (meson_crtc_state->crtc_eotf_by_property_flag)
+		return meson_crtc_state->eotf_type_by_property;
+
+	return crtc_eotf_type;
+}
+
+static int meson_hdmitx_decide_eotf_type
+	(struct am_meson_crtc_state *meson_crtc_state,
+	struct am_hdmitx_connector_state *hdmitx_state)
+{
+	struct hdmitx_common *tx_comm = am_hdmi_info.hdmitx_dev->hdmitx_common;
+
+	/*If the HDMI cable is not plugin before starting the board,pref_hdr_policy
+	 *may not be available in am_meson_update_output_state() function
+	 */
+	hdmitx_state->pref_hdr_policy = tx_comm->hdr_priority;
+	meson_crtc_state->crtc_eotf_type = meson_hdmitx_get_eotf_type(meson_crtc_state);
 
 	DRM_DEBUG_KMS("%s: [%u->%u]\n", __func__,
 		hdmitx_state->pref_hdr_policy,
 		meson_crtc_state->crtc_eotf_type);
 
 	return 0;
+}
+
+/*The recovery mode not have composer to set attr*/
+static bool meson_hdmitx_policy_decides_attr(struct am_meson_crtc_state *crtc_state)
+{
+	return (!crtc_state->uboot_mode_init && am_hdmi_info.recovery_mode) ||
+	       get_hdr_policy() == 1 || get_amdv_policy() == AMDV_FORCE_OUTPUT_MODE;
+}
+
+/*
+ * The attr a modeset of @crtc_state ends with when it starts from @attr:
+ * the decide of the encoder check when the policy owns it, else the keep
+ * or decide of the encoder mode_set. Writes only @attr.
+ */
+static void meson_hdmitx_modeset_color_attr(struct hdmitx_common *common,
+	struct am_meson_crtc_state *crtc_state,
+	struct hdmitx_color_attr *attr, u64 sequence_id)
+{
+	if (meson_hdmitx_policy_decides_attr(crtc_state) ||
+	    !meson_hdmitx_test_color_attr(common, crtc_state,
+					  meson_hdmitx_get_eotf_type(crtc_state),
+					  attr, sequence_id))
+		meson_hdmitx_decide_color_attr(common, crtc_state, attr,
+					       sequence_id);
 }
 
 static void meson_hdmitx_cal_brr(struct am_hdmi_tx *hdmitx,
@@ -1925,7 +2007,7 @@ void meson_hdmitx_encoder_atomic_mode_set(struct drm_encoder *encoder,
 	if (!hdmitx_state->color_force) {
 		if (attr->colorformat != HDMI_COLORSPACE_RESERVED6) {
 			if (meson_hdmitx_test_color_attr(tx_comm, meson_crtc_state,
-				attr, sequence_id)) {
+				meson_crtc_state->crtc_eotf_type, attr, sequence_id)) {
 				update_attr = false;
 			} else {
 				update_attr = true;
@@ -2177,9 +2259,7 @@ static int meson_hdmitx_encoder_atomic_check(struct drm_encoder *encoder,
 		hdmitx_state->frac_rate_policy = common->frac_rate_policy;
 	}
 
-	/*The recovery mode not have composer to set attr*/
-	if ((!meson_crtc_state->uboot_mode_init && am_hdmi_info.recovery_mode) ||
-	    (get_hdr_policy() == 1) || (get_amdv_policy() == AMDV_FORCE_OUTPUT_MODE))
+	if (meson_hdmitx_policy_decides_attr(meson_crtc_state))
 		meson_hdmitx_decide_color_attr(common, meson_crtc_state,
 						 attr, sequence_id);
 
