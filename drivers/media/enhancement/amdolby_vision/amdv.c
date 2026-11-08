@@ -4342,7 +4342,7 @@ static int amdv_policy_process_v2_tv(int *mode,
 
 static int amdv_policy_process_v2_stb(struct vframe_s *vf,
 				int *mode, enum signal_format_enum src_format,
-				const struct vinfo_s *vinfo)
+				const struct vinfo_s *vinfo, int *force)
 {
 	int mode_change = 0;
 	int h = 0;
@@ -4719,11 +4719,11 @@ static int amdv_policy_process_v2_stb(struct vframe_s *vf,
 			mode_change = 1;
 		}
 	} else if (dolby_vision_policy == AMDV_FORCE_OUTPUT_MODE) {
-		if (force_mode == AMDV_OUTPUT_MODE_IPT || force_mode == AMDV_OUTPUT_MODE_IPT_TUNNEL) {
+		if (*force == AMDV_OUTPUT_MODE_IPT || *force == AMDV_OUTPUT_MODE_IPT_TUNNEL) {
 			if (src_format == FORMAT_HDR10PLUS && vinfo && sink_support_hdr10_plus(vinfo))
 			{
-				force_mode = AMDV_OUTPUT_MODE_BYPASS;
-				*mode = force_mode;
+				*force = AMDV_OUTPUT_MODE_BYPASS;
+				*mode = *force;
 				if (dolby_vision_mode != *mode)
 					mode_change = 1;
 				else
@@ -4733,7 +4733,7 @@ static int amdv_policy_process_v2_stb(struct vframe_s *vf,
 					sink_hdr_support(vinfo));
 			} else if ((vinfo && sink_support_dv(vinfo) && is_match_amdv_attr()) ||
 				debug_force_mode) {
-				*mode = force_mode;
+				*mode = *force;
 				if (dolby_vision_mode != *mode)
 					mode_change = 1;
 				else
@@ -4759,7 +4759,7 @@ static int amdv_policy_process_v2_stb(struct vframe_s *vf,
 				pr_dv_dbg("src=%d, attr match error, force output mode change %d -> %d\n",
 					src_format, dolby_vision_mode, *mode);
 				}
-		} else if (force_mode == AMDV_OUTPUT_MODE_HDR10) {
+		} else if (*force == AMDV_OUTPUT_MODE_HDR10) {
 			if ((vinfo && sink_support_hdr(vinfo)) ||
 				debug_force_mode) {
 				*mode = AMDV_OUTPUT_MODE_HDR10;
@@ -4779,7 +4779,7 @@ static int amdv_policy_process_v2_stb(struct vframe_s *vf,
 				pr_dv_dbg("src=%d, attr match error, force output mode change %d -> %d\n",
 					src_format, dolby_vision_mode, *mode);
 			}
-		} else if (force_mode == AMDV_OUTPUT_MODE_SDR8) {
+		} else if (*force == AMDV_OUTPUT_MODE_SDR8) {
 			*mode = AMDV_OUTPUT_MODE_SDR8;
 			if (dolby_vision_mode != *mode)
 				mode_change = 1;
@@ -4787,7 +4787,7 @@ static int amdv_policy_process_v2_stb(struct vframe_s *vf,
 				mode_change = 0;
 			pr_dv_dbg("src=%d, force output mode %d -> %d\n",
 				src_format, dolby_vision_mode, *mode);
-		} else if (force_mode == AMDV_OUTPUT_MODE_BYPASS) {
+		} else if (*force == AMDV_OUTPUT_MODE_BYPASS) {
 			*mode = AMDV_OUTPUT_MODE_BYPASS;
 			if (dolby_vision_mode != *mode)
 				mode_change = 1;
@@ -4802,7 +4802,7 @@ static int amdv_policy_process_v2_stb(struct vframe_s *vf,
 			else
 				mode_change = 0;
 			pr_dv_dbg("warning: dolby does not support output %d, force output sdr\n, ",
-				force_mode);
+				*force);
 		}
 	}
 	return mode_change;
@@ -4810,7 +4810,7 @@ static int amdv_policy_process_v2_stb(struct vframe_s *vf,
 
 static int amdv_policy_process_for(struct vframe_s *vf, int *mode,
 				   enum signal_format_enum src_format,
-				   const struct vinfo_s *vinfo)
+				   const struct vinfo_s *vinfo, int *force)
 {
 	int mode_change = 0;
 
@@ -4827,7 +4827,8 @@ static int amdv_policy_process_for(struct vframe_s *vf, int *mode,
 		if (is_aml_tvmode())
 			mode_change = amdv_policy_process_v2_tv(mode, src_format);
 		else
-			mode_change = amdv_policy_process_v2_stb(vf, mode, src_format, vinfo);
+			mode_change = amdv_policy_process_v2_stb(vf, mode, src_format, vinfo,
+								 force);
 	} else {
 		mode_change = amdv_policy_process_v1(vf, mode, src_format, vinfo);
 	}
@@ -4837,7 +4838,8 @@ static int amdv_policy_process_for(struct vframe_s *vf, int *mode,
 int amdv_policy_process(struct vframe_s *vf, int *mode,
 			enum signal_format_enum src_format)
 {
-	return amdv_policy_process_for(vf, mode, src_format, get_current_vinfo());
+	return amdv_policy_process_for(vf, mode, src_format, get_current_vinfo(),
+				       &force_mode);
 }
 
 /* dv provider of each video layer*/
@@ -14085,9 +14087,10 @@ EXPORT_SYMBOL(get_amdv_target_mode);
 int get_amdv_mode_for(const struct vinfo_s *vinfo)
 {
 	int mode = READ_ONCE(dolby_vision_mode);
+	int force = READ_ONCE(force_mode);
 
 	/* userspace enables the engine only for a DV source or a forced output */
-	amdv_policy_process_for(NULL, &mode, cur_src_format_or(FORMAT_DOVI), vinfo);
+	amdv_policy_process_for(NULL, &mode, cur_src_format_or(FORMAT_DOVI), vinfo, &force);
 	return mode;
 }
 EXPORT_SYMBOL(get_amdv_mode_for);
