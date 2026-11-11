@@ -2593,24 +2593,17 @@ int dv_inst_map(int *inst)
 			local_irq_save(__sf);
 			write_seqcount_begin(&dv_inst[*inst].seq);
 			dv_inst[*inst].frame_count = 0;
-			dv_inst[*inst].last_mel_mode = 0;
-			dv_inst[*inst].last_total_md_size = 0;
-			dv_inst[*inst].last_total_comp_size = 0;
+			/* the frame on screen keeps its md and format until
+			 * this mapping shows its first frame
+			 */
+			dv_inst[*inst].keep_shown_state = true;
 			dv_inst[*inst].layer_id = VD_PATH_MAX;
 			dv_inst[*inst].video_height = 0;
 			dv_inst[*inst].video_width = 0;
 			dv_inst[*inst].valid = 0;
-			dv_inst[*inst].current_id = 0;
 			write_seqcount_end(&dv_inst[*inst].seq);
 			local_irq_restore(__sf);
 		}
-		/* size-before-pointer release: in_md==NULL implies in_md_size==0 */
-		WRITE_ONCE(dv_inst[*inst].src_format, FORMAT_SDR);
-		WRITE_ONCE(dv_inst[*inst].in_md_size, 0);
-		WRITE_ONCE(dv_inst[*inst].in_comp_size, 0);
-		smp_wmb();
-		WRITE_ONCE(dv_inst[*inst].in_md, NULL);
-		WRITE_ONCE(dv_inst[*inst].in_comp, NULL);
 		dv_inst[*inst].err_parse_cnt = 0;
 		mutex_unlock(&dv_inst_lock);
 		return 0;
@@ -2699,7 +2692,7 @@ void force_unmap_all_inst(void)
 		dv_inst[i].current_id = 0;
 		write_seqcount_end(&dv_inst[i].seq);
 		local_irq_restore(__sf);
-		/* size-before-pointer release (see dv_inst_map) */
+		/* size-before-pointer release: in_md==NULL implies in_md_size==0 */
 		WRITE_ONCE(dv_inst[i].src_format, FORMAT_INVALID);
 		WRITE_ONCE(dv_inst[i].in_md_size, 0);
 		WRITE_ONCE(dv_inst[i].in_comp_size, 0);
@@ -9617,6 +9610,32 @@ int amdv_parse_metadata_v2_stb(struct vframe_s *vf,
 	} //else {
 		//dv_id = layer_id_to_dv_id(vd_path);
 	//}
+
+	if (vf && toggle_mode == 1 && !drop_flag &&
+	    dv_inst[dv_id].keep_shown_state) {
+		unsigned long __sf;
+
+		/* first frame shown by this mapping: drop the state of the
+		 * frame it replaces, its own parse below writes what it carries
+		 */
+		local_irq_save(__sf);
+		write_seqcount_begin(&dv_inst[dv_id].seq);
+		dv_inst[dv_id].last_mel_mode = 0;
+		dv_inst[dv_id].last_total_md_size = 0;
+		dv_inst[dv_id].last_total_comp_size = 0;
+		dv_inst[dv_id].current_id = 0;
+		write_seqcount_end(&dv_inst[dv_id].seq);
+		local_irq_restore(__sf);
+		/* size-before-pointer release: in_md==NULL implies in_md_size==0 */
+		WRITE_ONCE(dv_inst[dv_id].src_format, FORMAT_SDR);
+		WRITE_ONCE(dv_inst[dv_id].in_md_size, 0);
+		WRITE_ONCE(dv_inst[dv_id].in_comp_size, 0);
+		smp_wmb(); /* release: sizes before pointers */
+		WRITE_ONCE(dv_inst[dv_id].in_md, NULL);
+		WRITE_ONCE(dv_inst[dv_id].in_comp, NULL);
+		dv_inst[dv_id].keep_shown_state = false;
+		last_current_format = FORMAT_INVALID;
+	}
 
 	if (src_format == FORMAT_INVALID)
 		last_current_format = src_format;
