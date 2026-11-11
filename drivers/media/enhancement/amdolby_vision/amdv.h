@@ -581,6 +581,7 @@ struct dv_inst_s {
 	u32 last_total_md_size;
 	u32 last_total_comp_size;
 	bool last_mel_mode;
+	bool keep_shown_state;/*state is the frame on screen's until the first shown frame*/
 	struct hdr10_parameter hdr10_param;
 	struct vframe_s *dv_vf[16][2];
 	u32 frame_count;
