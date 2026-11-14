@@ -1019,8 +1019,11 @@ static void vdin_vf_init(struct vdin_dev_s *devp)
 __maybe_unused static void vdin_rdma_irq(void *arg)
 {
 	struct vdin_dev_s *devp = arg;
+	unsigned long flags;
 	int ret;
 
+	/* vdin_v4l2_isr fills the table under this lock */
+	spin_lock_irqsave(&devp->isr_lock, flags);
 	ret = rdma_config(devp->rdma_handle,
 			  (devp->rdma_enable & 1) ?
 			  devp->rdma_irq : RDMA_TRIGGER_MANUAL);
@@ -1028,6 +1031,7 @@ __maybe_unused static void vdin_rdma_irq(void *arg)
 		devp->flags_isr |= VDIN_FLAG_RDMA_DONE;
 	else
 		devp->flags_isr &= ~VDIN_FLAG_RDMA_DONE;
+	spin_unlock_irqrestore(&devp->isr_lock, flags);
 
 	devp->rdma_irq_cnt++;
 	return;
