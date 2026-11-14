@@ -233,15 +233,12 @@ char *vb2_memory_sts_to_str(uint32_t memory)
 	}
 }
 
-void vdin_fill_pix_format(struct vdin_dev_s *devp)
+void vdin_fill_pix_format(struct vdin_dev_s *devp, struct v4l2_format *v4l2_fmt)
 {
-	struct v4l2_format *v4l2_fmt = NULL;
 	//unsigned int scan_mod = TVIN_SCAN_MODE_PROGRESSIVE;
 
 	if (IS_ERR_OR_NULL(devp))
 		return;
-
-	v4l2_fmt = &devp->v4l2_fmt;
 
 	if (v4l2_fmt->fmt.pix_mp.num_planes == 1) {
 		if (v4l2_fmt->fmt.pix_mp.pixelformat == V4L2_PIX_FMT_UYVY) {
@@ -760,7 +757,7 @@ static int vdin_vidioc_s_fmt_vid_cap_mplane(struct file *file,
 	devp->v4l2_fmt.fmt.pix_mp.pixelformat  = fmt->fmt.pix_mp.pixelformat;
 	devp->v4l2_fmt.fmt.pix_mp.num_planes   = fmt->fmt.pix_mp.num_planes;
 
-	vdin_fill_pix_format(devp);
+	vdin_fill_pix_format(devp, &devp->v4l2_fmt);
 	for (i = 0; i < fmt->fmt.pix_mp.num_planes; i++) {
 		fmt->fmt.pix_mp.plane_fmt[i].bytesperline =
 			devp->v4l2_fmt.fmt.pix_mp.plane_fmt[i].bytesperline;
@@ -1312,6 +1309,12 @@ static int vidioc_try_fmt_vid_cap_mplane(struct file *file, void *priv,
 		return -EINVAL;
 	}
 	vdin_v4l2_bound_size(devp, &f->fmt.pix_mp);
+	if (f->fmt.pix_mp.pixelformat == V4L2_PIX_FMT_NV12M ||
+	    f->fmt.pix_mp.pixelformat == V4L2_PIX_FMT_NV21M)
+		f->fmt.pix_mp.num_planes = 2;
+	else
+		f->fmt.pix_mp.num_planes = 1;
+	vdin_fill_pix_format(devp, f);
 
 	return 0;
 }
