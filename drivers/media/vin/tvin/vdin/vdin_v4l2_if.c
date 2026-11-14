@@ -1142,7 +1142,7 @@ static int vdin_vidioc_s_cid_video_win_info(struct vdin_dev_s *devp,
 static int vdin_vidioc_s_ext_ctrls(struct file *file, void *fh,
 			  struct v4l2_ext_controls *a)
 {
-	int i;
+	int i, ret = 0;
 	struct v4l2_ext_control *ctrl = a->controls;
 	struct vdin_dev_s *devp = video_drvdata(file);
 
@@ -1153,23 +1153,26 @@ static int vdin_vidioc_s_ext_ctrls(struct file *file, void *fh,
 	 * to the same control class
 	 */
 
-	for (i = 0; i < a->count; ctrl++, i++) {
+	for (i = 0; i < a->count && !ret; ctrl++, i++) {
 		switch (ctrl->id) {
 		case V4L2_CID_EXT_CAPTURE_PLANE_PROP:
-			vdin_vidioc_s_cid_plane_prop(devp, ctrl);
+			ret = vdin_vidioc_s_cid_plane_prop(devp, ctrl);
 			break;
 		case V4L2_CID_EXT_CAPTURE_FREEZE_MODE:
-			vdin_vidioc_s_cid_freeze_mode(devp, ctrl);
+			ret = vdin_vidioc_s_cid_freeze_mode(devp, ctrl);
 			break;
 		case V4L2_CID_EXT_CAPTURE_VIDEO_WIN_INFO:
-			vdin_vidioc_s_cid_video_win_info(devp, ctrl);
+			ret = vdin_vidioc_s_cid_video_win_info(devp, ctrl);
 			break;
 		default:
+			ret = -EINVAL;
 			break;
 		}
+		if (ret)
+			a->error_idx = i;
 	}
 
-	return 0;
+	return ret;
 }
 
 static int vdin_vidioc_try_ext_ctrls(struct file *file, void *fh,
