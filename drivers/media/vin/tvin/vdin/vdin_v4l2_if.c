@@ -176,6 +176,7 @@ int vdin_v4l2_if_isr(struct vdin_dev_s *devp, struct vframe_s *vfp)
 	list_del(&devp->cur_buff->list);
 	spin_unlock(&devp->list_head_lock);
 	devp->vdin_v4l2.stats.done_cnt++;
+	vb2buf->timestamp = ktime_get_ns();
 	vb2_buffer_done(vb2buf, VB2_BUF_STATE_DONE);
 
 	return 0;
@@ -1884,7 +1885,7 @@ static int vdin_v4l2_queue_init(struct vdin_dev_s *devp,
 	/*que->mem_ops = &vb2_vmalloc_memops;*/
 	/*que->mem_ops = &vb2_dma_sg_memops;*/
 
-	que->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_COPY;
+	que->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC | V4L2_BUF_FLAG_TSTAMP_SRC_EOF;
 	/*
 	 * Assume that this DMA engine needs to have at least two buffers
 	 * available before it can be started. The start_streaming() op
