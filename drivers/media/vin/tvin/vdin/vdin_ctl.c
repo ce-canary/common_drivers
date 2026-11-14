@@ -1198,13 +1198,19 @@ void vdin_set_top(struct vdin_dev_s *devp, unsigned int offset,
 		break;
 	case 0xa0:/* viu1 */
 		if (port >= TVIN_PORT_VIU1_VIDEO &&
-		    port <= TVIN_PORT_VIU1_WB1_POST_BLEND)
+		    port <= TVIN_PORT_VIU1_WB0_POST_BLEND)
 			vdin_mux = VDIN_MUX_VIU1_WB0;
+		else if (port >= TVIN_PORT_VIU1_WB1_VDIN_BIST &&
+			 port <= TVIN_PORT_VIU1_WB1_POST_BLEND)
+			vdin_mux = VDIN_MUX_VIU1_WB1;
 
 		if (port != TVIN_PORT_VIU1) {
 			if (vdin_mux == VDIN_MUX_VIU1_WB0)
 				wr_bits(offset, VDIN_ASFIFO_CTRL3, 0xe4,
 					VDI6_ASFIFO_CTRL_BIT, VDI_ASFIFO_CTRL_WID);
+			else if (vdin_mux == VDIN_MUX_VIU1_WB1)
+				wr_bits(offset, VDIN_ASFIFO_CTRL3, 0xe4,
+					VDI8_ASFIFO_CTRL_BIT, VDI_ASFIFO_CTRL_WID);
 		} else {
 			if (cpu_after_eq(MESON_CPU_MAJOR_ID_G12B))
 				wr_bits(offset, VDIN_ASFIFO_CTRL3, 0xd4,
