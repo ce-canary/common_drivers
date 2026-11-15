@@ -741,19 +741,38 @@ struct vdin_v4l2_s {
 	unsigned int input;
 	unsigned int sched[TVIN_TAP_MAX];
 	unsigned int sched_num;
-	/* the running schedule, none when the stream takes no turns */
+	/* the running schedule, none when the stream takes no turns; one set
+	 * while streaming waits in pend for the isr
+	 */
 	unsigned int run[TVIN_TAP_MAX];
 	unsigned int sched_armed;
 	unsigned int sched_pos;
+	unsigned int sched_gen;
+	unsigned int pend[TVIN_TAP_MAX];
+	unsigned int pend_num;
 	/* input of curr_wr_vfe */
 	unsigned int sched_cur;
+	/* inputs bound to a channel, and those whose tap field waits for
+	 * another table
+	 */
+	unsigned int held;
+	unsigned int pending;
 	/* the port the frontend gave each input */
 	enum tvin_port_e sched_port[VDIN_V4L2_INPUT_MAX];
-	/* the inputs are read through more than one vdin source */
-	bool sched_srcs;
-	/* this table writes the tap field, or the field waits for another table */
+	/* fixed at STREAMON for inputs that join */
+	enum vdin_format_convert_e convert;
+	bool ref_field;
+	/* an adopted schedule gives back the inputs it left at its first landed frame */
+	bool release;
+	/* this table writes the tap field; a drop stops it, and the cpu takes
+	 * the word a pass later
+	 */
 	bool sched_field;
-	bool sched_pending;
+	bool field_drop;
+	/* under isr_lock, from the end of vdin_start_dec until vdin_stop_dec
+	 * begins
+	 */
+	bool live;
 };
 
 struct vdin_vrr_s {
@@ -1220,6 +1239,7 @@ int vdin_open_fe(enum tvin_port_e port, int index,
 		 struct vdin_dev_s *devp);
 void vdin_close_fe(struct vdin_dev_s *devp);
 bool vdin_v4l2_sched_supported(struct vdin_dev_s *devp, struct tvin_frontend_s *fe);
+void vdin_v4l2_release_inputs(struct vdin_dev_s *devp, unsigned int mask);
 
 static inline unsigned int vdin_v4l2_inputs(const unsigned int *list, unsigned int num)
 {
