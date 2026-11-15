@@ -347,6 +347,26 @@ struct tvin_frontend_s *vdin_get_frontend(struct vdin_dev_s *devp,
 	return fe ?: tvin_get_frontend(port, index);
 }
 
+/* the vdin1 histogram runs while vdin1 does not capture and write-back
+ * channel 0 can carry the vpp; devp holds its fe_lock, and a vdin1 start
+ * owns vdin1 until it sets DEC_STARTED
+ */
+static void vdin_hist_resume(struct vdin_dev_s *devp)
+{
+	struct vdin_dev_s *vdin1_devp = vdin_devp[1];
+
+	if (IS_ERR_OR_NULL(vdin1_devp))
+		return;
+	if (devp != vdin1_devp)
+		mutex_lock_nested(&vdin1_devp->fe_lock, SINGLE_DEPTH_NESTING);
+	if ((vdin1_devp->flags & VDIN_FLAG_HIST_STARTED) &&
+	    !(vdin1_devp->flags & VDIN_FLAG_DEC_STARTED) &&
+	    !viuin_select_loopback_path())
+		vdin1_hw_hist_on_off(vdin1_devp, true);
+	if (devp != vdin1_devp)
+		mutex_unlock(&vdin1_devp->fe_lock);
+}
+
 /*
  * 1. find the corresponding frontend according to the port & save it.
  * 2. set default register, including:
@@ -435,6 +455,7 @@ void vdin_close_fe(struct vdin_dev_s *devp)
 	if (devp->frontend && devp->frontend->dec_ops->close) {
 		devp->frontend->dec_ops->close(devp->frontend, devp->port_type);
 		devp->frontend = NULL;
+		vdin_hist_resume(devp);
 	}
 	devp->parm.port = TVIN_PORT_NULL;
 	devp->parm.info.fmt  = TVIN_SIG_FMT_NULL;
@@ -1582,7 +1603,6 @@ void vdin_stop_dec(struct vdin_dev_s *devp)
 	int afbc_write_down_timeout = 500; /* 50ms to cover a 24Hz vsync */
 	int i = 0;
 #endif
-	struct vdin_dev_s *vdin1_devp = vdin_devp[1];
 	/* avoid null pointer oops */
 	if (!devp) {
 		pr_info("vdin err no frontend\n");
@@ -1707,12 +1727,6 @@ void vdin_stop_dec(struct vdin_dev_s *devp)
 #ifdef CONFIG_AMLOGIC_MEDIA_RDMA
 	rdma_clear(devp->rdma_handle);
 #endif
-	if (!IS_ERR_OR_NULL(vdin1_devp)) {
-		if (vdin1_devp->flags & VDIN_FLAG_HIST_STARTED) {
-			viuin_select_loopback_path();
-			vdin1_hw_hist_on_off(vdin1_devp, true);
-		}
-	}
 
 	devp->flags &= (~VDIN_FLAG_RDMA_ENABLE);
 	devp->ignore_frames = max_ignore_frame_cnt;
@@ -1972,8 +1986,12 @@ int start_tvin_service(int no, struct vdin_parm_s  *para)
 		/* a debug open that failed still sets VDIN_FLAG_DEC_OPENED */
 		if (fe->dec_ops->open &&
 		    (!(devp->flags & VDIN_FLAG_DEC_OPENED) || devp->frontend != fe)) {
+			/* the histogram gives its channel back while vdin1 captures */
+			if (devp == vdin_devp[1] && (devp->flags & VDIN_FLAG_HIST_STARTED))
+				viuin_clear_loopback_path();
 			ret = fe->dec_ops->open(fe, fe->port, devp->port_type);
 			if (ret) {
+				vdin_hist_resume(devp);
 				devp->frontend = NULL;
 				mutex_unlock(&devp->fe_lock);
 				return ret;
@@ -2040,6 +2058,7 @@ int start_tvin_service(int no, struct vdin_parm_s  *para)
 		if (fe_opened && fe->dec_ops->close) {
 			fe->dec_ops->close(fe, devp->port_type);
 			devp->frontend = NULL;
+			vdin_hist_resume(devp);
 		}
 		mutex_unlock(&devp->fe_lock);
 		return ret;
@@ -2158,6 +2177,9 @@ int stop_tvin_service(int no)
 		devp->flags &= (~VDIN_FLAG_V4L2_DEBUG);
 	devp->flags &= (~VDIN_FLAG_DEC_OPENED);
 	devp->flags &= (~VDIN_FLAG_DEC_STARTED);
+	/* a normal stop closed the frontend above */
+	if (devp->work_mode == VDIN_WORK_MD_NORMAL)
+		vdin_hist_resume(devp);
 	if (devp->parm.port != TVIN_PORT_VIU1 || viu_hw_irq != 0) {
 		free_irq(devp->irq, (void *)devp);
 
@@ -4958,8 +4980,8 @@ static long vdin_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		}
 
 		mutex_lock(&devp->fe_lock);
-		if (!(devp->flags & VDIN_FLAG_DEC_STARTED)) {
-			viuin_select_loopback_path();
+		if (!(devp->flags & VDIN_FLAG_DEC_STARTED) &&
+		    !viuin_select_loopback_path()) {
 			vdin1_hw_hist_on_off(devp, TRUE);
 			//vdin_ioctl_get_hist(devp, &vdin1_hist_temp);
 		}
