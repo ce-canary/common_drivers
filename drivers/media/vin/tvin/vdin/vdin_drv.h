@@ -1195,6 +1195,8 @@ int vdin_create_class_files(struct class *vdin_class);
 void vdin_remove_class_files(struct class *vdin_class);
 int vdin_create_device_files(struct device *dev);
 void vdin_remove_device_files(struct device *dev);
+struct tvin_frontend_s *vdin_get_frontend(struct vdin_dev_s *devp,
+					  enum tvin_port_e port, int index);
 int vdin_open_fe(enum tvin_port_e port, int index,
 		 struct vdin_dev_s *devp);
 void vdin_close_fe(struct vdin_dev_s *devp);

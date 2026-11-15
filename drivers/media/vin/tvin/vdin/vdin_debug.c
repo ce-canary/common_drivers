@@ -101,7 +101,7 @@ ssize_t sig_det_store(struct device *dev,
 
 	port = val;
 
-	frontend = tvin_get_frontend(port, 0);
+	frontend = vdin_get_frontend(devp, port, 0);
 	if (frontend && frontend->dec_ops &&
 	    frontend->dec_ops->callmaster_det) {
 		/*call the frontend det function*/
