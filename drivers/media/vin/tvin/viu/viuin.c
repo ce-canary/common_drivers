@@ -113,6 +113,13 @@ static unsigned short open_cnt;
 module_param(open_cnt, ushort, 0664);
 MODULE_PARM_DESC(open_cnt, "open_cnt for vdin0/1");
 
+#define VIUIN_CHAN_MAX	2
+/* one frontend per vdin, its index the vdin's */
+#define VIUIN_FE_NUM	2
+
+/* both write-back channels program the registers below; one lock orders them */
+static DEFINE_SPINLOCK(viuin_lock);
+
 struct viuin_s {
 	unsigned int flag;
 	struct vframe_prop_s *prop;
@@ -120,7 +127,15 @@ struct viuin_s {
 	struct tvin_frontend_s frontend;
 	struct vdin_parm_s parm;
 	unsigned int enc_info_addr;
+	/* the write-back channels this frontend reads */
+	unsigned int chans;
 };
+
+/* a channel carries one tap to every reader */
+static struct {
+	enum tvin_port_e tap;
+	unsigned int readers;
+} viuin_chan[VIUIN_CHAN_MAX];
 
 static inline u32 rd_viu(u32 reg)
 {
@@ -152,6 +167,12 @@ static inline u32 rd_bits_viu(u32 reg,
 	val = ((aml_read_vcbus(reg) >> (start)) & ((1L << (len)) - 1));
 
 	return val;
+}
+
+static bool viuin_is_wb1(enum tvin_port_e port)
+{
+	return port >= TVIN_PORT_VIU1_WB1_VDIN_BIST &&
+	       port <= TVIN_PORT_VIU1_WB1_POST_BLEND;
 }
 
 static int viuin_support(struct tvin_frontend_s *fe, enum tvin_port_e port)
@@ -212,10 +233,12 @@ void viuin_clear_loopback_path(void)
 }
 EXPORT_SYMBOL(viuin_clear_loopback_path);
 
+/* mux0 (vdin source 7) is bits 15:0, mux1 (source 9) bits 31:16 */
 static void viuin_set_vdin_if_mux_ctrl(enum tvin_port_e port)
 {
 	unsigned int viu_mux = 0;
 	unsigned int viu_sel = 0;
+	unsigned int base = viuin_is_wb1(port) ? 16 : 0;
 
 	switch (port) {
 	/* wr_bak_chan1_sel wb_chan_sel*/
@@ -287,41 +310,23 @@ static void viuin_set_vdin_if_mux_ctrl(enum tvin_port_e port)
 			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL_T3X, viu_mux, 0, 7);
 			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL_T3X, viu_mux, 8, 7);
 		} else if (cpu_after_eq(MESON_CPU_MAJOR_ID_T7)) {
-			/* for vdi6 , vdin source 7*/
-			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, 0, 0, 7);
-			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, viu_mux, 0, 7);
-			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, 0, 8, 7);
-			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, viu_mux, 8, 7);
-			/* for vdi8 , vdin source 9*/
-			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, 0, 16, 7);
-			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, viu_mux, 16, 7);
-			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, 0, 24, 7);
-			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, viu_mux, 24, 7);
+			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, 0, base, 7);
+			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, viu_mux, base, 7);
+			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, 0, base + 8, 7);
+			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, viu_mux, base + 8, 7);
 		} else {
-			/* for vdi6 , vdin source 7*/
-			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, 0, 0, 5);
-			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, viu_mux, 0, 5);
-			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, 0, 8, 5);
-			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, viu_mux, 8, 5);
-			/* for vdi8 , vdin source 9*/
-			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, 0, 16, 5);
-			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, viu_mux, 16, 5);
-			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, 0, 24, 5);
-			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, viu_mux, 24, 5);
+			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, 0, base, 5);
+			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, viu_mux, base, 5);
+			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, 0, base + 8, 5);
+			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, viu_mux, base + 8, 5);
 		}
 	} else if (viu_sel == 2) {
-		/* for vdi6 , vdin source 7*/
-		wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, 0, 0, 5);
-		wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, viu_mux, 0, 5);
-		wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, 0, 8, 5);
-		wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, viu_mux, 8, 5);
-		/* for vdi8 , vdin source 9*/
-		wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, 0, 16, 5);
-		wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, viu_mux, 16, 5);
-		wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, 0, 24, 5);
-		wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, viu_mux, 24, 5);
+		wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, 0, base, 5);
+		wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, viu_mux, base, 5);
+		wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, 0, base + 8, 5);
+		wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, viu_mux, base + 8, 5);
 	} else {
-		wr_viu(VPU_VIU_VDIN_IF_MUX_CTRL, 0);
+		wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, 0, base, 16);
 	}
 }
 
@@ -425,8 +430,7 @@ static void viuin_set_wr_bak_ctrl_s5(enum tvin_port_e port)
 		}
 		break;
 	default:
-		wr_bits_viu(VIU_WR_BAK_CTRL, 0, 0, 4);
-		wr_bits_viu(VIU_WR_BAK_CTRL, 0, 4, 4);
+		wr_bits_viu(VIU_WR_BAK_CTRL, 0, viuin_is_wb1(port) ? 4 : 0, 4);
 		wr_bits_viu(VPP1_WR_BAK_CTRL, 0, 0, 2);
 		wr_bits_viu(VPP2_WR_BAK_CTRL, 0, 0, 2);
 		break;
@@ -656,8 +660,7 @@ static void viuin_set_wr_bak_ctrl(enum tvin_port_e port)
 		wr_bits_viu(VPP_WR_BAK_CTRL, 0xff, 16, 8);
 		break;
 	default:
-		wr_bits_viu(VPP_WR_BAK_CTRL, 0, 0, 4);
-		wr_bits_viu(VPP_WR_BAK_CTRL, 0, 4, 4);
+		wr_bits_viu(VPP_WR_BAK_CTRL, 0, viuin_is_wb1(port) ? 4 : 0, 4);
 		wr_bits_viu(VPP1_WR_BAK_CTRL, 0, 0, 2);
 		wr_bits_viu(VPP2_WR_BAK_CTRL, 0, 0, 2);
 		break;
@@ -670,7 +673,9 @@ static int viuin_open(struct tvin_frontend_s *fe, enum tvin_port_e port,
 	enum tvin_port_type_e port_type)
 {
 	struct viuin_s *devp = container_of(fe, struct viuin_s, frontend);
+	unsigned int c = viuin_is_wb1(port);
 	unsigned int viu_mux = 0;
+	unsigned long flags;
 
 	if (!memcpy(&devp->parm, fe->private_data,
 		    sizeof(struct vdin_parm_s))) {
@@ -706,6 +711,21 @@ static int viuin_open(struct tvin_frontend_s *fe, enum tvin_port_e port,
 	}
 	/*no need check here, will timeout sometimes*/
 	/*viuin_check_venc_line(devp);*/
+	spin_lock_irqsave(&viuin_lock, flags);
+	/* another port on the channel would re-route its readers */
+	if (devp->chans ||
+	    (viuin_chan[c].readers && viuin_chan[c].tap != port)) {
+		spin_unlock_irqrestore(&viuin_lock, flags);
+		return -EBUSY;
+	}
+	devp->chans = BIT(c);
+	devp->flag = 0;
+	open_cnt++;
+	if (viuin_chan[c].readers++) {
+		spin_unlock_irqrestore(&viuin_lock, flags);
+		return 0;
+	}
+	viuin_chan[c].tap = port;
 	if (port == TVIN_PORT_VIU1_VIDEO && !is_meson_s5_cpu() && !is_meson_t3x_cpu()) {/*old chip*/
 		/* enable hsync for vdin loop */
 		wr_bits_viu(VIU_MISC_CTRL1, 1, 28, 1);
@@ -756,7 +776,6 @@ static int viuin_open(struct tvin_frontend_s *fe, enum tvin_port_e port,
 			if (port >= TVIN_PORT_VIU1_VIDEO &&
 			    port <= TVIN_PORT_VIU1_WB0_POST_BLEND) {
 				wr_bits_viu(WR_BACK_MISC_CTRL, 1, 0, 1);/*vd0 hsync*/
-				wr_bits_viu(WR_BACK_MISC_CTRL, 0, 1, 1);/*vd1 hsync*/
 			} else {
 				wr_bits_viu(WR_BACK_MISC_CTRL, 0xf, 0, 4);
 			}
@@ -766,22 +785,40 @@ static int viuin_open(struct tvin_frontend_s *fe, enum tvin_port_e port,
 		wr_bits_viu(VPU_VIU_VENC_MUX_CTRL, viu_mux, 4, 4);
 		wr_bits_viu(VPU_VIU_VENC_MUX_CTRL, viu_mux, 8, 4);
 	}
-	devp->flag = 0;
-	open_cnt++;
+	spin_unlock_irqrestore(&viuin_lock, flags);
 	return 0;
 }
 
 static void viuin_close(struct tvin_frontend_s *fe, enum tvin_port_type_e port_type)
 {
 	struct viuin_s *devp = container_of(fe, struct viuin_s, frontend);
+	unsigned long flags;
+	unsigned int c;
 
 	/*no need check here, will timeout sometimes*/
 	/*viuin_check_venc_line(devp);*/
+	spin_lock_irqsave(&viuin_lock, flags);
+	/* a frontend whose open failed reads no channel */
+	if (!devp->chans) {
+		spin_unlock_irqrestore(&viuin_lock, flags);
+		return;
+	}
+	for (c = 0; c < VIUIN_CHAN_MAX; c++) {
+		if (!(devp->chans & BIT(c)) || --viuin_chan[c].readers)
+			continue;
+		wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, 0, c ? 16 : 0, 16);
+#ifndef CONFIG_AMLOGIC_ZAPPER_CUT
+		/* txhd2 keystone path close */
+		if (is_meson_txhd2_cpu() && rd_bits_viu(VPP_WR_BAK_CTRL, 11, 1))
+			wr_bits_viu(VPP_WR_BAK_CTRL, 0, 11, 1);
+#endif
+	}
+	devp->chans = 0;
 	memset(&devp->parm, 0, sizeof(struct vdin_parm_s));
 	/*close the venc to vdin path*/
 	if (open_cnt)
 		open_cnt--;
-	if (open_cnt == 0) {
+	if (!viuin_chan[0].readers && !viuin_chan[1].readers) {
 		if (cpu_after_eq(MESON_CPU_MAJOR_ID_G12A)) {
 			wr_viu(VPU_VIU_VDIN_IF_MUX_CTRL, 0);
 			wr_viu(VPP_WR_BAK_CTRL, 0);
@@ -789,9 +826,10 @@ static void viuin_close(struct tvin_frontend_s *fe, enum tvin_port_type_e port_t
 			wr_bits_viu(VPU_VIU_VENC_MUX_CTRL, 0, 8, 4);
 			wr_bits_viu(VPU_VIU_VENC_MUX_CTRL, 0, 4, 4);
 		}
+		if (rd_viu(VPU_VIU2VDIN_HDN_CTRL) != 0)
+			wr_viu(VPU_VIU2VDIN_HDN_CTRL, 0x0);
 	}
-	if (rd_viu(VPU_VIU2VDIN_HDN_CTRL) != 0)
-		wr_viu(VPU_VIU2VDIN_HDN_CTRL, 0x0);
+	spin_unlock_irqrestore(&viuin_lock, flags);
 }
 
 static void viuin_start(struct tvin_frontend_s *fe, enum tvin_sig_fmt_e fmt,
@@ -818,13 +856,8 @@ static void viuin_stop(struct tvin_frontend_s *fe, enum tvin_port_e port,
 		devp->flag |= AMVIUIN_DEC_STOP;
 	else
 		pr_info("[viuin..]%s viu in dec isn't start.\n", __func__);
+	/* the last reader's close disables the channel */
 	//pr_info("%s %d Disable VIU to VDIN\n", __func__, __LINE__);
-	wr_viu(VPU_VIU_VDIN_IF_MUX_CTRL, 0);
-#ifndef CONFIG_AMLOGIC_ZAPPER_CUT
-	/* txhd2 keystone path close */
-	if (is_meson_txhd2_cpu() && rd_bits_viu(VPP_WR_BAK_CTRL, 11, 1))
-		wr_bits_viu(VPP_WR_BAK_CTRL, 0, 11, 1);
-#endif
 }
 
 static int viuin_isr(struct tvin_frontend_s *fe, unsigned int hcnt64,
@@ -1007,17 +1040,22 @@ static struct tvin_state_machine_ops_s viu_sm_ops = {
 static int viuin_probe(struct platform_device *pdev)
 {
 	struct viuin_s *viuin_devp;
+	int i;
 
-	viuin_devp = kmalloc(sizeof(*viuin_devp), GFP_KERNEL);
+	viuin_devp = kcalloc(VIUIN_FE_NUM, sizeof(*viuin_devp), GFP_KERNEL);
 	if (!viuin_devp)
 		return -ENOMEM;
-	memset(viuin_devp, 0, sizeof(struct viuin_s));
-	sprintf(viuin_devp->frontend.name, "%s", DEVICE_NAME);
-	if (!tvin_frontend_init(&viuin_devp->frontend,
-				&viu_dec_ops, &viu_sm_ops, 0)) {
-		if (tvin_reg_frontend(&viuin_devp->frontend))
-			pr_info("[viuin..]%s register viu frontend error.\n",
-				__func__);
+	for (i = 0; i < VIUIN_FE_NUM; i++) {
+		if (i)
+			sprintf(viuin_devp[i].frontend.name, "%s%d", DEVICE_NAME, i);
+		else
+			sprintf(viuin_devp[i].frontend.name, "%s", DEVICE_NAME);
+		if (!tvin_frontend_init(&viuin_devp[i].frontend,
+					&viu_dec_ops, &viu_sm_ops, i)) {
+			if (tvin_reg_frontend(&viuin_devp[i].frontend))
+				pr_info("[viuin..]%s register viu frontend error.\n",
+					__func__);
+		}
 	}
 	platform_set_drvdata(pdev, viuin_devp);
 	pr_info("[viuin..]%s probe ok.\n", __func__);
@@ -1027,9 +1065,11 @@ static int viuin_probe(struct platform_device *pdev)
 static int viuin_remove(struct platform_device *pdev)
 {
 	struct viuin_s *devp = platform_get_drvdata(pdev);
+	int i;
 
 	if (devp) {
-		tvin_unreg_frontend(&devp->frontend);
+		for (i = 0; i < VIUIN_FE_NUM; i++)
+			tvin_unreg_frontend(&devp[i].frontend);
 		kfree(devp);
 	}
 	return 0;
