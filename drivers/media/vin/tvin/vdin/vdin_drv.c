@@ -1098,6 +1098,38 @@ static void vdin_double_write_confirm(struct vdin_dev_s *devp)
 #endif
 }
 
+/* a schedule rides this vdin's own rdma table */
+bool vdin_v4l2_sched_supported(struct vdin_dev_s *devp, struct tvin_frontend_s *fe)
+{
+	return (devp->rdma_enable & 1) && devp->rdma_handle > 0 &&
+	       fe && fe->dec_ops->tap_open && fe->dec_ops->tap_property;
+}
+
+static void vdin_v4l2_queue_tap(struct vdin_dev_s *devp, unsigned int input)
+{
+#ifdef CONFIG_AMLOGIC_MEDIA_RDMA
+	if (devp->vdin_v4l2.sched_srcs)
+		rdma_write_reg_bits(devp->rdma_handle, VDIN_COM_CTRL0 + devp->addr_offset,
+				    vdin_wb_src(devp->vdin_v4l2.sched_port[input]),
+				    VDIN_SEL_BIT, VDIN_SEL_WID);
+#endif
+}
+
+/* the frame in vfe started with the registers queued for it */
+static bool vdin_v4l2_landed(struct vdin_dev_s *devp, struct vf_entry *vfe)
+{
+	u32 canvas_id = vfe->vf.canvas0Addr != (u32)-1 ? vfe->vf.canvas0Addr :
+			devp->vf_canvas_id[vfe->vf.index];
+
+	if (vdin_get_canvas_id(devp->addr_offset) != (canvas_id & 0xff))
+		return false;
+	if (devp->vdin_v4l2.sched_srcs &&
+	    rd_bits(devp->addr_offset, VDIN_COM_CTRL0, VDIN_SEL_BIT, VDIN_SEL_WID) !=
+	    vdin_wb_src(devp->vdin_v4l2.sched_port[vfe->v4l2_input]))
+		return false;
+	return true;
+}
+
 static u32 vdin_is_delay_vfe2rd_list(struct vdin_dev_s *devp)
 {
 	if (devp->index == 0 && !game_mode &&
@@ -1172,15 +1204,15 @@ static void vdin_scale_and_cutwin_handle(struct vdin_dev_s *devp)
  * Whether the vd1 or post blend input holds one field of an interlaced output.
  * The blend runs on one field; vd1 does too unless the fields are made after it.
  */
-bool vdin_v4l2_is_field(struct vdin_dev_s *devp)
+bool vdin_v4l2_is_field(struct vdin_dev_s *devp, enum tvin_port_e port)
 {
 	const struct vinfo_s *vinfo = get_current_vinfo();
 
 	if (devp->work_mode != VDIN_WORK_MD_V4L || vinfo->field_height >= vinfo->height)
 		return false;
 
-	return devp->v4l2_port_cur == TVIN_PORT_VIU1_WB0_POST_BLEND ||
-	       (devp->v4l2_port_cur == TVIN_PORT_VIU1_WB0_VD1 && !get_video_frm2fld_support());
+	return port == TVIN_PORT_VIU1_WB0_POST_BLEND ||
+	       (port == TVIN_PORT_VIU1_WB0_VD1 && !get_video_frm2fld_support());
 }
 
 /* the rows of a picture on a loopback input; vdin can not scale up */
@@ -1192,7 +1224,8 @@ unsigned int vdin_v4l2_source_height(struct vdin_dev_s *devp)
 	if (vinfo->info_3d == FP_3D)
 		return vinfo->height - vinfo->vtotal / 2;
 
-	return vdin_v4l2_is_field(devp) ? vinfo->field_height : vinfo->height;
+	return vdin_v4l2_is_field(devp, devp->v4l2_port_cur) ? vinfo->field_height :
+	       vinfo->height;
 }
 
 /*
@@ -1216,6 +1249,8 @@ int vdin_start_dec(struct vdin_dev_s *devp)
 {
 	struct tvin_state_machine_ops_s *sm_ops;
 	struct vf_entry *vfe;
+	enum tvin_port_e port;
+	unsigned int armed, i, in;
 	u32 sts;
 
 	/* avoid null pointer oops */
@@ -1243,6 +1278,29 @@ int vdin_start_dec(struct vdin_dev_s *devp)
 		return -1;
 	}
 
+	if (devp->work_mode != VDIN_WORK_MD_V4L)
+		devp->vdin_v4l2.sched_armed = 0;
+	armed = devp->vdin_v4l2.sched_armed;
+	devp->vdin_v4l2.sched_srcs = false;
+	if (armed) {
+		/* rdma_enable is a debug knob that may change after the schedule is set */
+		if (!vdin_v4l2_sched_supported(devp, devp->frontend))
+			return -EOPNOTSUPP;
+		for (i = 0; i < armed; i++) {
+			in = devp->vdin_v4l2.run[i];
+			port = devp->vdin_v4l2.sched_port[in];
+			/* the input is sized by the field of the S_INPUT tap */
+			if (vdin_v4l2_is_field(devp, devp->v4l2_port[in]) !=
+			    vdin_v4l2_is_field(devp, devp->v4l2_port_cur))
+				return -EOPNOTSUPP;
+			if (vdin_wb_src(port) !=
+			    vdin_wb_src(devp->vdin_v4l2.sched_port[devp->vdin_v4l2.run[0]]))
+				devp->vdin_v4l2.sched_srcs = true;
+		}
+	}
+	devp->vdin_v4l2.sched_cur = armed ? devp->vdin_v4l2.run[0] : devp->vdin_v4l2.input;
+	devp->vdin_v4l2.sched_pos = armed ? 1 : 0;
+
 	if (devp->frontend && devp->frontend->sm_ops) {
 		sm_ops = devp->frontend->sm_ops;
 		sm_ops->get_sig_property(devp->frontend, &devp->prop, devp->port_type);
@@ -1266,6 +1324,35 @@ int vdin_start_dec(struct vdin_dev_s *devp)
 			devp->parm.info.cfmt = devp->prop.color_format;
 
 		vdin_scale_and_cutwin_handle(devp);
+	}
+	if (devp->vdin_v4l2.sched_armed) {
+		struct tvin_frontend_s *fe = devp->frontend;
+		enum tvin_color_fmt_e cfmt = devp->prop.color_format;
+		enum vdin_format_convert_e convert;
+		struct tvin_sig_property_s *prop;
+		int ret = 0;
+
+		prop = kzalloc(sizeof(*prop), GFP_KERNEL);
+		if (!prop) {
+			devp->vdin_v4l2.sched_armed = 0;
+			return -ENOMEM;
+		}
+		vdin_get_format_convert(devp);
+		convert = devp->format_convert;
+		for (i = 1; i < devp->vdin_v4l2.sched_armed && !ret; i++) {
+			in = devp->vdin_v4l2.run[i];
+			fe->dec_ops->tap_property(fe, devp->vdin_v4l2.sched_port[in], prop);
+			devp->prop.color_format = prop->color_format;
+			vdin_get_format_convert(devp);
+			if (devp->format_convert != convert)
+				ret = -EINVAL;
+		}
+		devp->prop.color_format = cfmt;
+		kfree(prop);
+		if (ret) {
+			devp->vdin_v4l2.sched_armed = 0;
+			return ret;
+		}
 	}
 	/*gxbb/gxl/gxm use clkb as vdin clk,
 	 *for clkb is low speed,which is enough for 1080p process,
@@ -1313,7 +1400,7 @@ int vdin_start_dec(struct vdin_dev_s *devp)
 	devp->canvas_config_mode = canvas_config_mode;
 	/* h_active/v_active will be recalculated by bellow calling */
 	vdin_set_decimation(devp);
-	devp->v4l2_one_field = vdin_v4l2_is_field(devp);
+	devp->v4l2_one_field = vdin_v4l2_is_field(devp, devp->v4l2_port_cur);
 
 #ifndef CONFIG_AMLOGIC_ZAPPER_CUT
 	/* check if need enable afbce */
@@ -1444,15 +1531,44 @@ int vdin_start_dec(struct vdin_dev_s *devp)
 	}
 #endif
 	vdin_set_all_regs(devp);
+	if (devp->vdin_v4l2.sched_srcs) {
+		wr_bits(devp->addr_offset, VDIN_ASFIFO_CTRL3, 0xe4,
+			VDI6_ASFIFO_CTRL_BIT, VDI_ASFIFO_CTRL_WID);
+		wr_bits(devp->addr_offset, VDIN_ASFIFO_CTRL3, 0xe4,
+			VDI8_ASFIFO_CTRL_BIT, VDI_ASFIFO_CTRL_WID);
+	}
+	/* the cpu writes the first frame's address beside the source
+	 * vdin_set_top selected; it must land before the hardware runs
+	 */
+	vfe = provider_vf_peek(devp->vfp);
+	if (vfe && devp->vdin_v4l2.sched_srcs) {
+		vfe->v4l2_input = devp->vdin_v4l2.sched_cur;
+		vdin_frame_write_ctrl_set(devp, vfe, 0);
+		if (!vdin_v4l2_landed(devp, vfe)) {
+			/* undo the start above as vdin_stop_dec does */
+			vdin_hw_close(devp);
+			vdin_dolby_addr_release(devp, devp->vfp->size);
+#ifndef CONFIG_AMLOGIC_ZAPPER_CUT
+			vdin_mem_exit(devp);
+#endif
+#ifdef CONFIG_CMA
+			vdin_cma_release(devp);
+#endif
+			vdin_vpu_clk_mem_pd(devp, 0);
+			return -EOPNOTSUPP;
+		}
+	}
 	vdin_hw_enable(devp);
 	vdin_set_dv_tunnel(devp);
 	vdin_write_mif_or_afbce_init(devp);
 	/* screenshot stress test vdin1 hw crash addr need adjust config */
 	vfe = provider_vf_peek(devp->vfp);
-	if (vfe)
+	if (vfe) {
 		vdin_frame_write_ctrl_set(devp, vfe, 0);
-	else
+		vfe->v4l2_input = devp->vdin_v4l2.sched_cur;
+	} else {
 		pr_info("vdin%d:peek first vframe fail\n", devp->index);
+	}
 	//for debug
 	vdin_dbg_access_reg(devp, 0);
 
@@ -1839,6 +1955,7 @@ int start_tvin_service(int no, struct vdin_parm_s  *para)
 {
 	struct tvin_frontend_s *fe;
 	bool fe_opened = false;
+	unsigned int i, num, mask;
 	int ret = 0;
 	struct vdin_dev_s *devp = vdin_devp[no];
 	struct vdin_dev_s *vdin0_devp = vdin_devp[0];
@@ -1992,7 +2109,28 @@ int start_tvin_service(int no, struct vdin_parm_s  *para)
 			/* the histogram gives its channel back while vdin1 captures */
 			if (devp == vdin_devp[1] && (devp->flags & VDIN_FLAG_HIST_STARTED))
 				viuin_clear_loopback_path();
-			ret = fe->dec_ops->open(fe, fe->port, devp->port_type);
+			num = 0;
+			devp->vdin_v4l2.sched_armed = 0;
+			if (devp->work_mode == VDIN_WORK_MD_V4L) {
+				num = devp->vdin_v4l2.sched_num;
+				memcpy(devp->vdin_v4l2.run, devp->vdin_v4l2.sched,
+				       num * sizeof(devp->vdin_v4l2.run[0]));
+				if (!num)
+					devp->vdin_v4l2.run[num++] = devp->vdin_v4l2.input;
+				if (devp->vdin_v4l2.sched_num)
+					devp->vdin_v4l2.sched_armed = num;
+				for (i = 0; i < num; i++)
+					devp->vdin_v4l2.sched_port[devp->vdin_v4l2.run[i]] =
+						devp->v4l2_port[devp->vdin_v4l2.run[i]];
+			} else {
+				devp->vdin_v4l2.run[num++] = 0;
+				devp->vdin_v4l2.sched_port[0] = fe->port;
+			}
+			mask = vdin_v4l2_inputs(devp->vdin_v4l2.run, num);
+			ret = fe->dec_ops->tap_open ?
+			      fe->dec_ops->tap_open(fe, devp->vdin_v4l2.sched_port, mask,
+						    devp->vdin_v4l2.run[0], devp->port_type) :
+			      fe->dec_ops->open(fe, fe->port, devp->port_type);
 			if (ret) {
 				vdin_hist_resume(devp);
 				devp->frontend = NULL;
@@ -3803,6 +3941,7 @@ irqreturn_t vdin_v4l2_isr(int irq, void *dev_id)
 	unsigned int offset;
 	unsigned int protect_mode;
 	bool blank;
+	unsigned int input;
 
 	if (!devp)
 		return IRQ_HANDLED;
@@ -3823,6 +3962,12 @@ irqreturn_t vdin_v4l2_isr(int irq, void *dev_id)
 
 	spin_lock_irqsave(&devp->isr_lock, flags);
 
+	/* the rdma done callback configures the table under isr_lock. A frame
+	 * keeps its entries, queued before VDIN_WR_CTRL, until a buffer
+	 * follows.
+	 */
+	vdin_v4l2_queue_tap(devp, devp->vdin_v4l2.sched_cur);
+
 	if (devp->frame_drop_num) {
 		devp->frame_drop_num--;
 		devp->vdin_irq_flag = VDIN_IRQ_FLG_DROP_FRAME;
@@ -3830,17 +3975,22 @@ irqreturn_t vdin_v4l2_isr(int irq, void *dev_id)
 		goto irq_handled;
 	}
 
+	/* with turns the frame is recycled and the turn passes, so a blank tap
+	 * does not hold the others
+	 */
 	blank = vdin_is_v4l2_input_blank(devp);
 	if ((!vdin_is_input_valid(devp) &&
 	     (devp->vdin_function_sel & VDIN_NOT_DATA_INPUT_DROP)) || blank) {
 		devp->vdin_irq_flag = VDIN_IRQ_FLG_FAKE_IRQ;
-		/* the frame held across the gap is not checked, so it is not put */
-		if (blank)
-			devp->chg_drop_frame_cnt = 1;
 		vdin_drop_frame_info(devp, "no data input");
 		if (vdin_dbg_en & 0x10)
 			devp->frame_drop_num = 6;
-		goto irq_handled;
+		if (!devp->vdin_v4l2.sched_armed) {
+			/* the frame held across the gap is not checked, so it is not put */
+			if (blank)
+				devp->chg_drop_frame_cnt = 1;
+			goto irq_handled;
+		}
 	}
 
 	/* protect mem will fail sometimes due to no res from tee module */
@@ -3911,6 +4061,14 @@ irqreturn_t vdin_v4l2_isr(int irq, void *dev_id)
 
 	next_wr_vfe = provider_vf_peek(devp->vfp);
 
+	/* the table queued with curr_wr_vfe ran at this vsync. A frame that
+	 * did not start with its own entries is not delivered, nor
+	 * last_wr_vfe, which a slipped address overwrites.
+	 */
+	curr_wr_vfe = devp->curr_wr_vfe;
+	curr_wr_vfe->v4l2_unlanded = devp->vdin_v4l2.sched_srcs &&
+		!vdin_v4l2_landed(devp, curr_wr_vfe);
+
 	if (devp->last_wr_vfe) {
 		/*add for force vdin buffer recycle*/
 		if (!next_wr_vfe &&
@@ -3919,6 +4077,11 @@ irqreturn_t vdin_v4l2_isr(int irq, void *dev_id)
 		else
 			put_md = VDIN_VF_PUT;
 
+		if (devp->last_wr_vfe->v4l2_unlanded ||
+		    devp->curr_wr_vfe->v4l2_unlanded) {
+			put_md = VDIN_VF_RECYCLE;
+			devp->vdin_v4l2.stats.drop_unlanded++;
+		}
 		vdin_get_crc_val(&devp->last_wr_vfe->vf, devp);
 		vdin_vframe_put_and_recycle(devp, devp->last_wr_vfe,
 					    put_md);
@@ -4017,6 +4180,15 @@ irqreturn_t vdin_v4l2_isr(int irq, void *dev_id)
 	next_wr_vfe->vf.ready_jiffies64 = jiffies_64;
 	next_wr_vfe->vf.ready_clock[0] = sched_clock();
 
+	/* rewrites the entry queued above in place, in the table of the address */
+	input = devp->vdin_v4l2.sched_armed ?
+		devp->vdin_v4l2.run[devp->vdin_v4l2.sched_pos] : devp->vdin_v4l2.input;
+	next_wr_vfe->v4l2_input = input;
+	vdin_v4l2_queue_tap(devp, input);
+	devp->vdin_v4l2.sched_cur = input;
+	if (devp->vdin_v4l2.sched_armed)
+		devp->vdin_v4l2.sched_pos = (devp->vdin_v4l2.sched_pos + 1) %
+					    devp->vdin_v4l2.sched_armed;
 	vdin_frame_write_ctrl_set(devp, next_wr_vfe,
 				  devp->flags & VDIN_FLAG_RDMA_ENABLE);
 

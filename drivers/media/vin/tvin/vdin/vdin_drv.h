@@ -708,6 +708,8 @@ struct vdin_t3x_s {
 struct vdin_v4l2_stat_s {
 	/* frame drop due to framerate control */
 	unsigned int drop_divide;
+	/* frame drop because an rdma table slipped a frame */
+	unsigned int drop_unlanded;
 	unsigned int done_cnt;
 	unsigned int que_cnt;
 	unsigned int dque_cnt;
@@ -735,6 +737,20 @@ struct vdin_v4l2_s {
 	unsigned int secure_flg:1;
 	enum v4l2_ext_capture_location l;
 	struct vdin_v4l2_stat_s stats;
+	/* S_INPUT index; the schedule S_EXT_CTRLS sets for the next STREAMON */
+	unsigned int input;
+	unsigned int sched[TVIN_TAP_MAX];
+	unsigned int sched_num;
+	/* the running schedule, none when the stream takes no turns */
+	unsigned int run[TVIN_TAP_MAX];
+	unsigned int sched_armed;
+	unsigned int sched_pos;
+	/* input of curr_wr_vfe */
+	unsigned int sched_cur;
+	/* the port the frontend gave each input */
+	enum tvin_port_e sched_port[VDIN_V4L2_INPUT_MAX];
+	/* the inputs are read through more than one vdin source */
+	bool sched_srcs;
 };
 
 struct vdin_vrr_s {
@@ -1200,7 +1216,17 @@ struct tvin_frontend_s *vdin_get_frontend(struct vdin_dev_s *devp,
 int vdin_open_fe(enum tvin_port_e port, int index,
 		 struct vdin_dev_s *devp);
 void vdin_close_fe(struct vdin_dev_s *devp);
-bool vdin_v4l2_is_field(struct vdin_dev_s *devp);
+bool vdin_v4l2_sched_supported(struct vdin_dev_s *devp, struct tvin_frontend_s *fe);
+
+static inline unsigned int vdin_v4l2_inputs(const unsigned int *list, unsigned int num)
+{
+	unsigned int mask = 0;
+
+	while (num--)
+		mask |= BIT(list[num]);
+	return mask;
+}
+bool vdin_v4l2_is_field(struct vdin_dev_s *devp, enum tvin_port_e port);
 unsigned int vdin_v4l2_source_height(struct vdin_dev_s *devp);
 int vdin_start_dec(struct vdin_dev_s *devp);
 void vdin_self_start_dec(struct vdin_dev_s *devp);
