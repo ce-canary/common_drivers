@@ -131,11 +131,13 @@ struct viuin_s {
 	unsigned int chans;
 };
 
-/* a channel carries one tap to every reader */
+/* a channel carries one tap to every reader; the vdin1 histogram is one */
 static struct {
 	enum tvin_port_e tap;
 	unsigned int readers;
 } viuin_chan[VIUIN_CHAN_MAX];
+
+static bool viuin_hist;
 
 static inline u32 rd_viu(u32 reg)
 {
@@ -206,30 +208,56 @@ void viuin_check_venc_line(struct viuin_s *devp_local)
 			__func__, vencv_line_cur, cnt);
 }
 
-void viuin_select_loopback_path(void)
+/* the vdin1 histogram reads the vpp output through write-back channel 0 */
+int viuin_select_loopback_path(void)
 {
+	unsigned long flags;
+	int ret = 0;
+
+	spin_lock_irqsave(&viuin_lock, flags);
+	if (!viuin_hist && viuin_chan[0].readers &&
+	    viuin_chan[0].tap != TVIN_PORT_VIU1_WB0_VPP)
+		ret = -EBUSY;
+	if (viuin_hist || ret)
+		goto out;
+	viuin_hist = true;
+	if (viuin_chan[0].readers++)
+		goto out;
+	viuin_chan[0].tap = TVIN_PORT_VIU1_WB0_VPP;
 	/* set VPU_VIU_VDIN_IF_MUX_CTRL */
-	wr_viu(VPU_VIU_VDIN_IF_MUX_CTRL_T3X, 0x8080808);
+	wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL_T3X, 0x808, 0, 16);
 	/* set VPP_WRBAK_CTRL */
-	wr_viu(VPP_WR_BAK_CTRL, 0xff0006);
+	wr_bits_viu(VPP_WR_BAK_CTRL, 6, 0, 4);
+	wr_bits_viu(VPP_WR_BAK_CTRL, 0xff, 16, 8);
 	/* wrback hsync en */
 	//if (port >= TVIN_PORT_VIU1_VIDEO &&
 	//    port <= TVIN_PORT_VIU1_WB0_POST_BLEND) {
 	wr_bits_viu(WR_BACK_MISC_CTRL, 1, 0, 1);/*vd0 hsync*/
-	wr_bits_viu(WR_BACK_MISC_CTRL, 0, 1, 1);/*vd1 hsync*/
 	//} else {
 	//	wr_bits_viu(WR_BACK_MISC_CTRL, 0xf, 0, 4);
 	//}
 	//if (cpu_after_eq(MESON_CPU_MAJOR_ID_T5M)) {
 	wr_viu(VIU_FRM_CTRL, 0x3000004);
 	//}
+out:
+	spin_unlock_irqrestore(&viuin_lock, flags);
+	return ret;
 }
 EXPORT_SYMBOL(viuin_select_loopback_path);
 
 void viuin_clear_loopback_path(void)
 {
-	wr_viu(VPU_VIU_VDIN_IF_MUX_CTRL, 0);
-	wr_viu(VPP_WR_BAK_CTRL, 0);
+	unsigned long flags;
+
+	spin_lock_irqsave(&viuin_lock, flags);
+	if (viuin_hist) {
+		viuin_hist = false;
+		if (!--viuin_chan[0].readers) {
+			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, 0, 0, 16);
+			wr_bits_viu(VPP_WR_BAK_CTRL, 0, 0, 4);
+		}
+	}
+	spin_unlock_irqrestore(&viuin_lock, flags);
 }
 EXPORT_SYMBOL(viuin_clear_loopback_path);
 
