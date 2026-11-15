@@ -110,6 +110,6 @@ struct tvin_state_machine_ops_s *tvin_get_sm_ops(enum tvin_port_e port,
 						 int index);
 void tvin_notify_vdin_skip_frame(unsigned int drop_num,  enum tvin_port_type_e port_type);
 void tvin_update_vdin_prop(void);
-void viuin_select_loopback_path(void);
+int viuin_select_loopback_path(void);
 void viuin_clear_loopback_path(void);
 #endif
