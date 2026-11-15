@@ -336,6 +336,17 @@ void tvin_notify_vdin_skip_frame(unsigned int drop_num, enum tvin_port_type_e po
 }
 EXPORT_SYMBOL(tvin_notify_vdin_skip_frame);
 
+/* viuin registers one frontend per vdin, under the vdin index */
+struct tvin_frontend_s *vdin_get_frontend(struct vdin_dev_s *devp,
+					  enum tvin_port_e port, int index)
+{
+	struct tvin_frontend_s *fe = NULL;
+
+	if (port >= TVIN_PORT_VIU1 && port < TVIN_PORT_VENC_MAX)
+		fe = tvin_get_frontend(port, devp->index);
+	return fe ?: tvin_get_frontend(port, index);
+}
+
 /*
  * 1. find the corresponding frontend according to the port & save it.
  * 2. set default register, including:
@@ -353,7 +364,7 @@ EXPORT_SYMBOL(tvin_notify_vdin_skip_frame);
  */
 int vdin_open_fe(enum tvin_port_e port, int index,  struct vdin_dev_s *devp)
 {
-	struct tvin_frontend_s *fe = tvin_get_frontend(port, index);
+	struct tvin_frontend_s *fe = vdin_get_frontend(devp, port, index);
 	int ret = 0;
 
 	if (!fe) {
@@ -362,7 +373,6 @@ int vdin_open_fe(enum tvin_port_e port, int index,  struct vdin_dev_s *devp)
 		return -1;
 	}
 
-	devp->frontend = fe;
 	devp->parm.port = port;
 
 	devp->parm.info.status = TVIN_SIG_STATUS_NULL;
@@ -377,12 +387,14 @@ int vdin_open_fe(enum tvin_port_e port, int index,  struct vdin_dev_s *devp)
 		devp->vdin_clk_flag = 1;
 	}
 
-	if (devp->frontend->dec_ops && devp->frontend->dec_ops->open)
-		ret = devp->frontend->dec_ops->open(devp->frontend,
-			port, devp->port_type);
+	if (fe->dec_ops && fe->dec_ops->open)
+		ret = fe->dec_ops->open(fe, port, devp->port_type);
 	/* check open status */
-	if (ret)
-		return 1;
+	if (ret) {
+		devp->frontend = NULL;
+		return ret;
+	}
+	devp->frontend = fe;
 
 	if (IS_HDMI_SRC(port) || IS_TVAFE_SRC(port)) {
 		/* init vdin state machine */
@@ -1809,6 +1821,7 @@ int vdin_loopback_parm_adjust(struct vdin_dev_s *devp, struct vdin_parm_s  *para
 int start_tvin_service(int no, struct vdin_parm_s  *para)
 {
 	struct tvin_frontend_s *fe;
+	bool fe_opened = false;
 	int ret = 0;
 	struct vdin_dev_s *devp = vdin_devp[no];
 	struct vdin_dev_s *vdin0_devp = vdin_devp[0];
@@ -1949,20 +1962,29 @@ int start_tvin_service(int no, struct vdin_parm_s  *para)
 		devp->bt_path = para->bt_path;
 		fe = tvin_get_frontend(devp->parm.port, 1);
 	} else {
-		fe = tvin_get_frontend(devp->parm.port, 0);
+		fe = vdin_get_frontend(devp, devp->parm.port, 0);
 	}
 
 	if (fe) {
 		fe->private_data = para;
 		fe->port         = devp->parm.port;
+
+		/* a debug open that failed still sets VDIN_FLAG_DEC_OPENED */
+		if (fe->dec_ops->open &&
+		    (!(devp->flags & VDIN_FLAG_DEC_OPENED) || devp->frontend != fe)) {
+			ret = fe->dec_ops->open(fe, fe->port, devp->port_type);
+			if (ret) {
+				devp->frontend = NULL;
+				mutex_unlock(&devp->fe_lock);
+				return ret;
+			}
+			fe_opened = true;
+		}
 		devp->frontend   = fe;
 
 		/* vdin msr clock gate enable */
 		if (devp->msr_clk)
 			clk_prepare_enable(devp->msr_clk);
-
-		if (fe->dec_ops->open && !(devp->flags & VDIN_FLAG_DEC_OPENED))
-			fe->dec_ops->open(fe, fe->port, devp->port_type);
 	} else {
 		pr_err("%s(%d): not supported port 0x%x\n",
 		       __func__, no, devp->parm.port);
@@ -2014,8 +2036,13 @@ int start_tvin_service(int no, struct vdin_parm_s  *para)
 	ret = vdin_start_dec(devp);
 	if (ret) {
 		pr_err("[vdin]%s kmalloc error.\n", __func__);
+		/* release the frontend opened above, the caller may not stop */
+		if (fe_opened && fe->dec_ops->close) {
+			fe->dec_ops->close(fe, devp->port_type);
+			devp->frontend = NULL;
+		}
 		mutex_unlock(&devp->fe_lock);
-		return -1;
+		return ret;
 	}
 
 	devp->flags |= VDIN_FLAG_DEC_OPENED;
@@ -2108,6 +2135,9 @@ int stop_tvin_service(int no)
 	if (!(devp->flags & VDIN_FLAG_DEC_STARTED)) {
 		pr_err("vdin%d %s:decode hasn't started flags=0x%x\n",
 			devp->index, __func__, devp->flags);
+		/* a decoder that stopped itself left its frontend open */
+		if (devp->work_mode == VDIN_WORK_MD_V4L)
+			vdin_close_fe(devp);
 		mutex_unlock(&devp->fe_lock);
 		return -EBUSY;
 	}
@@ -2162,6 +2192,9 @@ int stop_tvin_service(int no)
 			end_time,
 			end_time - devp->start_time);
 	pr_info("vdin%d %s flags=0x%x\n", devp->index, __func__, devp->flags);
+	/* v4l2 mode closes the frontend after the decoder */
+	if (devp->work_mode == VDIN_WORK_MD_V4L)
+		vdin_close_fe(devp);
 	mutex_unlock(&devp->fe_lock);
 	return 0;
 }
@@ -4778,7 +4811,7 @@ static long vdin_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 			ret = -EFAULT;
 			break;
 		}
-		fe = tvin_get_frontend(port_call, 0);
+		fe = vdin_get_frontend(devp, port_call, 0);
 		if (fe && fe->dec_ops && fe->dec_ops->callmaster_det) {
 			/*call the frontend det function*/
 			callmaster_status =
