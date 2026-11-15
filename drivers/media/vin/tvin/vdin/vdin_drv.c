@@ -3011,7 +3011,7 @@ static bool vdin_is_input_valid(struct vdin_dev_s *devp)
 /* a blank input reports no lines, whatever the cut, the scaling or the field */
 static bool vdin_is_v4l2_input_blank(struct vdin_dev_s *devp)
 {
-	if (!devp->index || devp->work_mode != VDIN_WORK_MD_V4L)
+	if (!IS_LOOPBACK_SRC(devp->parm.port) || devp->work_mode != VDIN_WORK_MD_V4L)
 		return false;
 
 	return vdin_get_active_h(devp) <= devp->vdin_input_data_threshold ||
