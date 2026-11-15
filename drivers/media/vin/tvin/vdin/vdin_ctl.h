@@ -203,6 +203,8 @@ void vdin_set_vframe_prop_info(struct vframe_s *vf,
 void vdin_get_crc_val(struct vframe_s *vf, struct vdin_dev_s *devp);
 void vdin_get_format_convert(struct vdin_dev_s *devp);
 enum vdin_format_convert_e
+vdin_v4l2_format_convert(enum tvin_color_fmt_e cfmt, u32 pixelformat);
+enum vdin_format_convert_e
 	vdin_get_format_convert_matrix0(struct vdin_dev_s *devp);
 enum vdin_format_convert_e
 	vdin_get_format_convert_matrix1(struct vdin_dev_s *devp);
@@ -230,6 +232,8 @@ unsigned int vdin_get_active_v(struct vdin_dev_s *devp);
 unsigned int vdin_get_total_v(struct vdin_dev_s *devp);
 unsigned int vdin_get_canvas_id(unsigned int offset);
 unsigned int vdin_wb_src(enum tvin_port_e port);
+bool vdin_wb_src_sel(void);
+void vdin_set_wb_asfifo(struct vdin_dev_s *devp, enum tvin_port_e port);
 void vdin_set_canvas_id(struct vdin_dev_s *devp,
 			unsigned int rdma_enable,
 			struct vf_entry *vfe);
