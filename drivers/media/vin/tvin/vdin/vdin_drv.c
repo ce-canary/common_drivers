@@ -1199,6 +1199,7 @@ void vdin_v4l2_release_inputs(struct vdin_dev_s *devp, unsigned int mask)
 		return;
 	devp->vdin_v4l2.held &= ~mask;
 	devp->vdin_v4l2.pending &= ~mask;
+	devp->vdin_v4l2.no_signal &= ~mask;
 	if (fe->dec_ops->tap_release(fe, mask))
 		return;
 	if (devp->vdin_v4l2.sched_field)
@@ -4208,6 +4209,30 @@ irqreturn_t vdin_v4l2_isr(int irq, void *dev_id)
 	 */
 	turns = devp->vdin_v4l2.sched_armed > 1 || devp->vdin_v4l2.pend_num;
 	blank = vdin_is_v4l2_input_blank(devp);
+	/* the input of the frame that just finished, as userbits[0] names it */
+	vfe = turns ? devp->last_wr_vfe : NULL;
+	if (vfe)
+		input = vfe->v4l2_entries ? vfe->v4l2_input : devp->vdin_v4l2.input;
+	else if (turns)
+		input = devp->vdin_v4l2.sched_cur;
+	else
+		input = devp->vdin_v4l2.sched_armed ? devp->vdin_v4l2.run[0] :
+			devp->vdin_v4l2.input;
+	/* the bit is written before the event, so ENUMINPUT after DQEVENT reads it */
+	if ((!vfe || !vfe->v4l2_unlanded) &&
+	    (blank || (devp->vdin_v4l2.no_signal & BIT(input)))) {
+		struct v4l2_event ev = {
+			.type = V4L2_EVENT_SOURCE_CHANGE,
+			.id = input,
+			.u.src_change.changes = V4L2_EVENT_SRC_CH_RESOLUTION,
+		};
+
+		if (blank)
+			devp->vdin_v4l2.no_signal |= BIT(input);
+		else
+			devp->vdin_v4l2.no_signal &= ~BIT(input);
+		v4l2_event_queue(&devp->video_dev, &ev);
+	}
 	if ((!vdin_is_input_valid(devp) &&
 	     (devp->vdin_function_sel & VDIN_NOT_DATA_INPUT_DROP)) || blank) {
 		devp->vdin_irq_flag = VDIN_IRQ_FLG_FAKE_IRQ;

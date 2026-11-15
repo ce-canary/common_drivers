@@ -390,6 +390,8 @@ static int vdin_vidioc_enum_input(struct file *file,
 	}
 
 	inp->std = V4L2_STD_ALL;
+	if (devp->vdin_v4l2.no_signal & BIT(inp->index))
+		inp->status |= V4L2_IN_ST_NO_SIGNAL;
 	str = tvin_port_str(devp->v4l2_port[inp->index]);
 
 	if (str)
@@ -1680,6 +1682,15 @@ static int vdin_vidioc_s_parm(struct file *file, void *priv,
 	return 0;
 }
 
+static int vdin_vidioc_subscribe_event(struct v4l2_fh *fh,
+				       const struct v4l2_event_subscription *sub)
+{
+	if (sub->type == V4L2_EVENT_SOURCE_CHANGE)
+		return v4l2_src_change_event_subscribe(fh, sub);
+
+	return -EINVAL;
+}
+
 static const struct v4l2_ioctl_ops vdin_v4l2_ioctl_ops = {
 	.vidioc_querystd	= vdin_vidioc_querystd,
 	.vidioc_enum_input	= vdin_vidioc_enum_input,
@@ -1721,6 +1732,9 @@ static const struct v4l2_ioctl_ops vdin_v4l2_ioctl_ops = {
 	.vidioc_g_fmt_vid_cap			= vdin_vidioc_g_fmt_vid_cap,
 	.vidioc_g_fmt_vid_out_mplane	= vdin_vidioc_g_fmt_vid_cap_mplane,
 	.vidioc_g_fmt_vid_out			= vdin_vidioc_g_fmt_vid_cap,
+
+	.vidioc_subscribe_event = vdin_vidioc_subscribe_event,
+	.vidioc_unsubscribe_event = v4l2_event_unsubscribe,
 };
 
 static void vdin_vdev_release(struct video_device *vdev)
@@ -2093,6 +2107,7 @@ static void vdin_vb2ops_stop_streaming(struct vb2_queue *vq)
 
 	dprintk(2, "%s\n", __func__);
 	vdin_v4l2_stop_tvin(devp);
+	devp->vdin_v4l2.no_signal = 0;
 
 	devp->vb_queue.streaming = false;
 
