@@ -1113,21 +1113,32 @@ static void vdin_v4l2_queue_tap(struct vdin_dev_s *devp, unsigned int input)
 				    vdin_wb_src(devp->vdin_v4l2.sched_port[input]),
 				    VDIN_SEL_BIT, VDIN_SEL_WID);
 #endif
+	if (devp->vdin_v4l2.sched_field)
+		devp->frontend->dec_ops->tap_queue(devp->frontend, devp->rdma_handle, input);
 }
 
-/* the frame in vfe started with the registers queued for it */
-static bool vdin_v4l2_landed(struct vdin_dev_s *devp, struct vf_entry *vfe)
+/* the frame in vfe started with the registers queued for it and, with field,
+ * its tap field
+ */
+static bool vdin_v4l2_landed(struct vdin_dev_s *devp, struct vf_entry *vfe, bool field)
 {
 	u32 canvas_id = vfe->vf.canvas0Addr != (u32)-1 ? vfe->vf.canvas0Addr :
 			devp->vf_canvas_id[vfe->vf.index];
+	bool addr;
 
-	if (vdin_get_canvas_id(devp->addr_offset) != (canvas_id & 0xff))
+#ifndef CONFIG_AMLOGIC_ZAPPER_CUT
+	if (is_meson_s5_cpu())
+		addr = vdin_wr_addr_is_s5(devp, vfe);
+	else
+#endif
+		addr = vdin_get_canvas_id(devp->addr_offset) == (canvas_id & 0xff);
+	if (!addr)
 		return false;
 	if (devp->vdin_v4l2.sched_srcs &&
 	    rd_bits(devp->addr_offset, VDIN_COM_CTRL0, VDIN_SEL_BIT, VDIN_SEL_WID) !=
 	    vdin_wb_src(devp->vdin_v4l2.sched_port[vfe->v4l2_input]))
 		return false;
-	return true;
+	return !field || devp->frontend->dec_ops->tap_landed(devp->frontend, vfe->v4l2_input);
 }
 
 static u32 vdin_is_delay_vfe2rd_list(struct vdin_dev_s *devp)
@@ -1250,7 +1261,7 @@ int vdin_start_dec(struct vdin_dev_s *devp)
 	struct tvin_state_machine_ops_s *sm_ops;
 	struct vf_entry *vfe;
 	enum tvin_port_e port;
-	unsigned int armed, i, in;
+	unsigned int armed, i, j, in;
 	u32 sts;
 
 	/* avoid null pointer oops */
@@ -1296,6 +1307,16 @@ int vdin_start_dec(struct vdin_dev_s *devp)
 			if (vdin_wb_src(port) !=
 			    vdin_wb_src(devp->vdin_v4l2.sched_port[devp->vdin_v4l2.run[0]]))
 				devp->vdin_v4l2.sched_srcs = true;
+			/* taps on one channel need this table to switch the
+			 * field; a restart without a new open lost that role
+			 */
+			for (j = 0; j < i && !devp->vdin_v4l2.sched_field; j++) {
+				in = devp->vdin_v4l2.run[j];
+				if (devp->vdin_v4l2.sched_port[in] != port &&
+				    vdin_wb_src(devp->vdin_v4l2.sched_port[in]) ==
+				    vdin_wb_src(port))
+					return -EOPNOTSUPP;
+			}
 		}
 	}
 	devp->vdin_v4l2.sched_cur = armed ? devp->vdin_v4l2.run[0] : devp->vdin_v4l2.input;
@@ -1541,10 +1562,10 @@ int vdin_start_dec(struct vdin_dev_s *devp)
 	 * vdin_set_top selected; it must land before the hardware runs
 	 */
 	vfe = provider_vf_peek(devp->vfp);
-	if (vfe && devp->vdin_v4l2.sched_srcs) {
+	if (vfe && (devp->vdin_v4l2.sched_srcs || devp->vdin_v4l2.sched_field)) {
 		vfe->v4l2_input = devp->vdin_v4l2.sched_cur;
 		vdin_frame_write_ctrl_set(devp, vfe, 0);
-		if (!vdin_v4l2_landed(devp, vfe)) {
+		if (!vdin_v4l2_landed(devp, vfe, devp->vdin_v4l2.sched_field)) {
 			/* undo the start above as vdin_stop_dec does */
 			vdin_hw_close(devp);
 			vdin_dolby_addr_release(devp, devp->vfp->size);
@@ -1846,6 +1867,10 @@ void vdin_stop_dec(struct vdin_dev_s *devp)
 #ifdef CONFIG_AMLOGIC_MEDIA_RDMA
 	rdma_clear(devp->rdma_handle);
 #endif
+	if (devp->vdin_v4l2.sched_field) {
+		devp->frontend->dec_ops->tap_disarm(devp->frontend);
+		devp->vdin_v4l2.sched_field = false;
+	}
 
 	devp->flags &= (~VDIN_FLAG_RDMA_ENABLE);
 	devp->ignore_frames = max_ignore_frame_cnt;
@@ -2131,6 +2156,15 @@ int start_tvin_service(int no, struct vdin_parm_s  *para)
 			      fe->dec_ops->tap_open(fe, devp->vdin_v4l2.sched_port, mask,
 						    devp->vdin_v4l2.run[0], devp->port_type) :
 			      fe->dec_ops->open(fe, fe->port, devp->port_type);
+			devp->vdin_v4l2.sched_field = ret > 0 && (ret & TVIN_TAP_FIELD);
+			devp->vdin_v4l2.sched_pending = ret > 0 && (ret & TVIN_TAP_PENDING);
+			/* only the v4l2 isr checks that a deferred field landed */
+			if (devp->vdin_v4l2.sched_pending && devp->work_mode != VDIN_WORK_MD_V4L) {
+				fe->dec_ops->close(fe, devp->port_type);
+				ret = -EBUSY;
+			}
+			if (ret > 0)
+				ret = 0;
 			if (ret) {
 				vdin_hist_resume(devp);
 				devp->frontend = NULL;
@@ -3942,6 +3976,7 @@ irqreturn_t vdin_v4l2_isr(int irq, void *dev_id)
 	unsigned int protect_mode;
 	bool blank;
 	unsigned int input;
+	bool field;
 
 	if (!devp)
 		return IRQ_HANDLED;
@@ -3964,7 +3999,7 @@ irqreturn_t vdin_v4l2_isr(int irq, void *dev_id)
 
 	/* the rdma done callback configures the table under isr_lock. A frame
 	 * keeps its entries, queued before VDIN_WR_CTRL, until a buffer
-	 * follows.
+	 * follows; the field table carries the cpu writes of other frontends.
 	 */
 	vdin_v4l2_queue_tap(devp, devp->vdin_v4l2.sched_cur);
 
@@ -4066,8 +4101,11 @@ irqreturn_t vdin_v4l2_isr(int irq, void *dev_id)
 	 * last_wr_vfe, which a slipped address overwrites.
 	 */
 	curr_wr_vfe = devp->curr_wr_vfe;
-	curr_wr_vfe->v4l2_unlanded = devp->vdin_v4l2.sched_srcs &&
-		!vdin_v4l2_landed(devp, curr_wr_vfe);
+	field = devp->vdin_v4l2.sched_field || devp->vdin_v4l2.sched_pending;
+	curr_wr_vfe->v4l2_unlanded = (devp->vdin_v4l2.sched_srcs || field) &&
+		!vdin_v4l2_landed(devp, curr_wr_vfe, field);
+	if (!curr_wr_vfe->v4l2_unlanded)
+		devp->vdin_v4l2.sched_pending = false;
 
 	if (devp->last_wr_vfe) {
 		/*add for force vdin buffer recycle*/

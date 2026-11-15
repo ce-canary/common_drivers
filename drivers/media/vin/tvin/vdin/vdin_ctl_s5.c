@@ -2089,6 +2089,12 @@ unsigned int vdin_get_total_v_s5(unsigned int offset)
 		       GO_LN_CNT_SDW_BIT, GO_LN_CNT_SDW_WID);
 }
 
+bool vdin_wr_addr_is_s5(struct vdin_dev_s *devp, struct vf_entry *vfe)
+{
+	return rd(devp->addr_offset, VDIN_WRMIF_BADDR_LUMA) ==
+	       vfe->vf.canvas0_config[0].phy_addr >> 4;
+}
+
 void vdin_set_frame_mif_write_addr_s5(struct vdin_dev_s *devp,
 			unsigned int rdma_enable,
 			struct vf_entry *vfe)
