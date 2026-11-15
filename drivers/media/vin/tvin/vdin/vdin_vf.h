@@ -126,6 +126,13 @@ struct isr_log_s {
 };
 #endif
 
+struct vdin_v4l2_size {
+	unsigned int width;
+	unsigned int height;
+	unsigned int stride;
+	unsigned int sizeimage[2];
+};
+
 struct vf_entry {
 	struct vframe_s vf;
 	enum vf_status_e status;
@@ -144,6 +151,10 @@ struct vf_entry {
 	unsigned int v4l2_entries;
 	/* its frame did not start with its own address and source */
 	bool v4l2_unlanded;
+	/* the layout its canvases or addresses hold; none once its buffer
+	 * moved
+	 */
+	struct vdin_v4l2_size v4l2_size;
 };
 
 struct vf_pool {
