@@ -137,6 +137,8 @@ static struct {
 	unsigned int readers;
 } viuin_chan[VIUIN_CHAN_MAX];
 
+/* the write-back channels the vpp offers, from the vdin dt */
+static unsigned int viuin_chans = 1;
 static bool viuin_hist;
 
 static inline u32 rd_viu(u32 reg)
@@ -176,6 +178,25 @@ static bool viuin_is_wb1(enum tvin_port_e port)
 	return port >= TVIN_PORT_VIU1_WB1_VDIN_BIST &&
 	       port <= TVIN_PORT_VIU1_WB1_POST_BLEND;
 }
+
+/* a write-back tap is named by its channel 0 port */
+static enum tvin_port_e viuin_tap(enum tvin_port_e port)
+{
+	if (port >= TVIN_PORT_VIU1_WB1_VIDEO && port <= TVIN_PORT_VIU1_WB1_POST_BLEND)
+		return port - TVIN_PORT_VIU1_WB1_VIDEO + TVIN_PORT_VIU1_VIDEO;
+	return port;
+}
+
+static bool viuin_is_tap(enum tvin_port_e tap)
+{
+	return tap >= TVIN_PORT_VIU1_VIDEO && tap <= TVIN_PORT_VIU1_WB0_POST_BLEND;
+}
+
+void viuin_set_wb_channels(unsigned int num)
+{
+	viuin_chans = clamp(num, 1U, (unsigned int)VIUIN_CHAN_MAX);
+}
+EXPORT_SYMBOL(viuin_set_wb_channels);
 
 static int viuin_support(struct tvin_frontend_s *fe, enum tvin_port_e port)
 {
@@ -701,9 +722,10 @@ static int viuin_open(struct tvin_frontend_s *fe, enum tvin_port_e port,
 	enum tvin_port_type_e port_type)
 {
 	struct viuin_s *devp = container_of(fe, struct viuin_s, frontend);
-	unsigned int c = viuin_is_wb1(port);
+	enum tvin_port_e tap = viuin_tap(port);
 	unsigned int viu_mux = 0;
 	unsigned long flags;
+	unsigned int c, i;
 
 	if (!memcpy(&devp->parm, fe->private_data,
 		    sizeof(struct vdin_parm_s))) {
@@ -740,12 +762,29 @@ static int viuin_open(struct tvin_frontend_s *fe, enum tvin_port_e port,
 	/*no need check here, will timeout sometimes*/
 	/*viuin_check_venc_line(devp);*/
 	spin_lock_irqsave(&viuin_lock, flags);
-	/* another port on the channel would re-route its readers */
-	if (devp->chans ||
-	    (viuin_chan[c].readers && viuin_chan[c].tap != port)) {
+	/* the channel that carries the tap, else a free one; a port that is
+	 * no write-back tap has its own channel
+	 */
+	c = VIUIN_CHAN_MAX;
+	for (i = 0; i < viuin_chans; i++) {
+		if (!viuin_is_tap(tap) && i != viuin_is_wb1(port))
+			continue;
+		if (viuin_chan[i].readers && viuin_chan[i].tap == tap) {
+			c = i;
+			break;
+		}
+		if (!viuin_chan[i].readers && c == VIUIN_CHAN_MAX)
+			c = i;
+	}
+	if (devp->chans || c == VIUIN_CHAN_MAX) {
 		spin_unlock_irqrestore(&viuin_lock, flags);
 		return -EBUSY;
 	}
+	/* the caller takes the port of the channel it was given */
+	if (viuin_is_tap(tap))
+		port = c ? tap - TVIN_PORT_VIU1_VIDEO + TVIN_PORT_VIU1_WB1_VIDEO : tap;
+	fe->port = port;
+	devp->parm.port = port;
 	devp->chans = BIT(c);
 	devp->flag = 0;
 	open_cnt++;
@@ -753,7 +792,7 @@ static int viuin_open(struct tvin_frontend_s *fe, enum tvin_port_e port,
 		spin_unlock_irqrestore(&viuin_lock, flags);
 		return 0;
 	}
-	viuin_chan[c].tap = port;
+	viuin_chan[c].tap = tap;
 	if (port == TVIN_PORT_VIU1_VIDEO && !is_meson_s5_cpu() && !is_meson_t3x_cpu()) {/*old chip*/
 		/* enable hsync for vdin loop */
 		wr_bits_viu(VIU_MISC_CTRL1, 1, 28, 1);
