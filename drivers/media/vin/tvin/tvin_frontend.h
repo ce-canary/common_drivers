@@ -112,4 +112,5 @@ void tvin_notify_vdin_skip_frame(unsigned int drop_num,  enum tvin_port_type_e p
 void tvin_update_vdin_prop(void);
 int viuin_select_loopback_path(void);
 void viuin_clear_loopback_path(void);
+void viuin_set_wb_channels(unsigned int num);
 #endif

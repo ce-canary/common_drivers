@@ -407,6 +407,7 @@ int vdin_open_fe(enum tvin_port_e port, int index,  struct vdin_dev_s *devp)
 		devp->vdin_clk_flag = 1;
 	}
 
+	fe->port = port;
 	if (fe->dec_ops && fe->dec_ops->open)
 		ret = fe->dec_ops->open(fe, port, devp->port_type);
 	/* check open status */
@@ -415,6 +416,8 @@ int vdin_open_fe(enum tvin_port_e port, int index,  struct vdin_dev_s *devp)
 		return ret;
 	}
 	devp->frontend = fe;
+	/* a frontend may give another port of the same input */
+	devp->parm.port = fe->port;
 
 	if (IS_HDMI_SRC(port) || IS_TVAFE_SRC(port)) {
 		/* init vdin state machine */
@@ -1997,6 +2000,8 @@ int start_tvin_service(int no, struct vdin_parm_s  *para)
 				return ret;
 			}
 			fe_opened = true;
+			/* a frontend may give another port of the same input */
+			devp->parm.port = fe->port;
 		}
 		devp->frontend   = fe;
 
@@ -6280,6 +6285,7 @@ static void vdin_get_dts_config(struct vdin_dev_s *devp,
 	struct platform_device *pdev)
 {
 	int ret = 0;
+	u32 wb_channels;
 
 	ret = of_property_read_u32(pdev->dev.of_node,
 				   "set_canvas_manual",
@@ -6326,6 +6332,10 @@ static void vdin_get_dts_config(struct vdin_dev_s *devp,
 
 	devp->dbg_no_wr_check =
 		of_property_read_bool(pdev->dev.of_node, "dbg_no_wr_check");
+
+	/* write-back channels the vpp offers a loopback node */
+	if (!of_property_read_u32(pdev->dev.of_node, "wb_channels", &wb_channels))
+		viuin_set_wb_channels(wb_channels);
 
 	ret = of_property_read_u32(pdev->dev.of_node, "lossy_mode",
 				   &devp->cr_lossy_param.lossy_mode);
