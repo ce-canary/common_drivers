@@ -2717,9 +2717,9 @@ void vdin_set_frame_mif_write_addr(struct vdin_dev_s *devp,
 	else
 		hsize = devp->h_active;
 
-	stride_luma = devp->canvas_w >> 4;
+	stride_luma = vfe->vf.canvas0_config[0].width >> 4;
 	if (vfe->vf.plane_num == 2)
-		stride_chroma = devp->canvas_w >> 4;
+		stride_chroma = vfe->vf.canvas0_config[1].width >> 4;
 
 	/* one region mode only have one buffer RGB,YUV */
 	phy_addr_luma = vfe->vf.canvas0_config[0].phy_addr;
@@ -2880,6 +2880,16 @@ bool vdin_wb_src_sel(void)
 		return false;
 #endif
 	return true;
+}
+
+/* where vdin_v4l2_queue_tap rewrites the scaler and write window per frame */
+bool vdin_v4l2_size_live(void)
+{
+#ifndef CONFIG_AMLOGIC_ZAPPER_CUT
+	if (is_meson_s5_cpu())
+		return true;
+#endif
+	return vdin_wb_src_sel();
 }
 
 void vdin_set_wb_asfifo(struct vdin_dev_s *devp, enum tvin_port_e port)
@@ -4872,6 +4882,12 @@ void vdin_set_hv_scale(struct vdin_dev_s *devp)
 			vdin_set_hscale(devp, devp->prop.scaling4w);
 	} else if (devp->h_active > VDIN_MAX_H_ACTIVE) {
 		vdin_set_hscale(devp, VDIN_MAX_H_ACTIVE);
+	} else if (devp->vdin_v4l2.sched_armed) {
+		/* a live size change only enables the scaler set up here */
+		vdin_set_hscale(devp, devp->h_active);
+		wr_bits(devp->addr_offset, VDIN_SC_MISC_CTRL, 0, HSCL_EN_BIT, HSCL_EN_WID);
+		wr_bits(devp->addr_offset, VDIN_SC_MISC_CTRL, 0, PRE_HSCL_MODE_BIT,
+			PRE_HSCL_MODE_WID);
 	}
 
 	if (devp->prop.scaling4h < devp->v_active &&
@@ -4883,6 +4899,14 @@ void vdin_set_hv_scale(struct vdin_dev_s *devp)
 
 		if (devp->prop.scaling4h < devp->v_active)
 			vdin_set_vscale(devp);
+	} else if (devp->vdin_v4l2.sched_armed) {
+		wr_bits(devp->addr_offset, VDIN_VSC_INI_CTRL, 0,
+			VSC_PHASE0_ALWAYS_EN_BIT, VSC_PHASE0_ALWAYS_EN_WID);
+		wr_bits(devp->addr_offset, VDIN_VSC_INI_CTRL, 0x8000,
+			VSCALER_INI_PHASE_BIT, VSCALER_INI_PHASE_WID);
+		wr_bits(devp->addr_offset, VDIN_VSC_INI_CTRL, 0,
+			INI_SKIP_LINE_NUM_BIT, INI_SKIP_LINE_NUM_WID);
+		wr(devp->addr_offset, VDIN_DUMMY_DATA, 0x008080);
 	}
 
 set_hv_shrink:

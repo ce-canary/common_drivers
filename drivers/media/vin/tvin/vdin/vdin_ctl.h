@@ -233,6 +233,7 @@ unsigned int vdin_get_total_v(struct vdin_dev_s *devp);
 unsigned int vdin_get_canvas_id(unsigned int offset);
 unsigned int vdin_wb_src(enum tvin_port_e port);
 bool vdin_wb_src_sel(void);
+bool vdin_v4l2_size_live(void);
 void vdin_set_wb_asfifo(struct vdin_dev_s *devp, enum tvin_port_e port);
 void vdin_set_canvas_id(struct vdin_dev_s *devp,
 			unsigned int rdma_enable,
