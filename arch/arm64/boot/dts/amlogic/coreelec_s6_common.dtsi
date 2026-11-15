@@ -176,8 +176,20 @@
 	wifi_static_buf = <2>;  /* dhd wifi for android */
 };
 
+&vdin0 {
+	status = "okay";
+	v4l_support_en;
+	/* vdin1's inputs: VD1, VD2, VD3, OSD1, OSD2, VPP, POST_BLEND */
+	fe_ports = <0x0000a002 0x0000a003 0x0000a004 0x0000a005
+		    0x0000a006 0x0000a008 0x0000a009>;
+	/* VPP_WRBAK_CTRL has two channel selects */
+	wb_channels = <2>;
+};
+
 &vdin1 {
 	/* VD1, VD2, VD3, OSD1, OSD2, VPP, POST_BLEND; the driver holds 7 */
 	fe_ports = <0x0000a002 0x0000a003 0x0000a004 0x0000a005
 		    0x0000a006 0x0000a008 0x0000a009>;
+	/* VPP_WRBAK_CTRL has two channel selects */
+	wb_channels = <2>;
 };

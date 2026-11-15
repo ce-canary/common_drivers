@@ -211,11 +211,19 @@
 };
 
 &vdin0 {
-	status = "disabled";
+	status = "okay";
+	v4l_support_en;
+	/* vdin1's inputs: VD1, VD2, OSD1, OSD2, VPP, POST_BLEND */
+	fe_ports = <0x0000a002 0x0000a003 0x0000a005 0x0000a006
+		    0x0000a008 0x0000a009>;
+	/* VPP_WRBAK_CTRL has two channel selects */
+	wb_channels = <2>;
 };
 
 &vdin1 {
 	v4l_support_en;
+	/* VPP_WRBAK_CTRL has two channel selects */
+	wb_channels = <2>;
 };
 
 &pinctrl_periphs {
