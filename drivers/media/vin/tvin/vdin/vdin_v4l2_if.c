@@ -185,6 +185,10 @@ int vdin_v4l2_if_isr(struct vdin_dev_s *devp, struct vframe_s *vfp)
 	vb->timecode.userbits[0] = vfe->v4l2_entries ? vfe->v4l2_input : devp->vdin_v4l2.input;
 	vb->timecode.userbits[1] = max(vfe->v4l2_entries, 1U);
 	vb->timecode.userbits[2] = vfe->v4l2_gen & 0xff;
+	vb->timecode.frames = vfe->v4l2_size.width & 0xff;
+	vb->timecode.seconds = vfe->v4l2_size.width >> 8;
+	vb->timecode.minutes = vfe->v4l2_size.height & 0xff;
+	vb->timecode.hours = vfe->v4l2_size.height >> 8;
 	vb->flags |= V4L2_BUF_FLAG_TIMECODE;
 	vb2_buffer_done(vb2buf, VB2_BUF_STATE_DONE);
 
@@ -446,8 +450,10 @@ static int vdin_vidioc_reqbufs(struct file *file, void *priv,
 	else
 		devp->v4l2_req_buf_num = reqbufs->count;
 	/* vb2 refuses a release while streaming */
-	if (!ret && !reqbufs->count)
+	if (!ret && !reqbufs->count) {
 		devp->vdin_v4l2.sched_num = 0;
+		memset(&devp->vdin_v4l2.size, 0, sizeof(devp->vdin_v4l2.size));
+	}
 
 	vb_buf = to_vb2_v4l2_buffer(devp->vb_queue.bufs[i]);
 	vdin_buf = to_vdin_vb_buf(vb_buf);
@@ -888,17 +894,56 @@ static int vdin_vidioc_s_drm_mode(struct vdin_dev_s *devp,
 	return 0;
 }
 
+static void vdin_v4l2_size_set(struct vdin_dev_s *devp, struct vdin_v4l2_size *size,
+			       unsigned int width, unsigned int height)
+{
+	struct v4l2_format fmt = devp->v4l2_fmt;
+
+	fmt.fmt.pix_mp.width = width;
+	fmt.fmt.pix_mp.height = height;
+	vdin_fill_pix_format(devp, &fmt);
+	size->width = width;
+	size->height = height;
+	size->stride = fmt.fmt.pix_mp.plane_fmt[0].bytesperline;
+	size->sizeimage[0] = fmt.fmt.pix_mp.plane_fmt[0].sizeimage;
+	size->sizeimage[1] = fmt.fmt.pix_mp.plane_fmt[1].sizeimage;
+}
+
+/* a plane without memory yet is checked when it is queued */
+static bool vdin_v4l2_fits(struct vdin_dev_s *devp, struct vb2_buffer *vb,
+			   const struct vdin_v4l2_size *size)
+{
+	dma_addr_t addr;
+	unsigned int i;
+
+	for (i = 0; i < vb->num_planes; i++) {
+		if (!vb->planes[i].mem_priv)
+			continue;
+		addr = vb2_dma_contig_plane_dma_addr(vb, i);
+		if (vb2_plane_size(vb, i) <
+		    size->sizeimage[i] + roundup(addr, devp->canvas_align) - addr)
+			return false;
+	}
+	return true;
+}
+
+/* the size passes the S_FMT bounds unchanged, on a running stream also the
+ * source size it started with; every buffer must hold it and the running size
+ */
 static int vdin_vidioc_s_input_schedule(struct vdin_dev_s *devp,
 					struct file *file,
 					struct v4l2_ext_control *ctrl)
 {
 	struct v4l2_ext_capture_input_schedule sched;
+	struct v4l2_pix_format_mplane pix;
 	enum tvin_port_e ports[VDIN_V4L2_INPUT_MAX];
+	struct vdin_v4l2_size size;
 	unsigned int num;
 	struct tvin_sig_property_s *prop;
+	struct vb2_buffer *vb;
 	struct tvin_frontend_s *fe;
 	unsigned long flags;
-	unsigned int i, add;
+	unsigned int i, add, line_buff;
 	bool streaming;
 	int ret;
 
@@ -928,14 +973,40 @@ static int vdin_vidioc_s_input_schedule(struct vdin_dev_s *devp,
 			return -EINVAL;
 	}
 
-	if ((sched.width || sched.height) &&
-	    (sched.width != devp->v4l2_fmt.fmt.pix_mp.width ||
-	     sched.height != devp->v4l2_fmt.fmt.pix_mp.height))
-		return -EINVAL;
+	if (!sched.width && !sched.height) {
+		sched.width = devp->v4l2_fmt.fmt.pix_mp.width;
+		sched.height = devp->v4l2_fmt.fmt.pix_mp.height;
+	}
+	/* the caller knows every frame's size from the size it set */
+	pix = devp->v4l2_fmt.fmt.pix_mp;
+	pix.width = sched.width;
+	pix.height = sched.height;
+	vdin_v4l2_bound_size(devp, &pix);
+	if (pix.width != sched.width || pix.height != sched.height)
+		return -ERANGE;
+	if (!vdin_v4l2_size_live() && (sched.width != devp->v4l2_fmt.fmt.pix_mp.width ||
+				       sched.height != devp->v4l2_fmt.fmt.pix_mp.height))
+		return -ERANGE;
+	vdin_v4l2_size_set(devp, &size, sched.width, sched.height);
+	/* a buffer is checked against the running and pending sizes when it
+	 * is queued, so one that the hardware may write fits both
+	 */
+	ret = 0;
+	spin_lock_irqsave(&devp->isr_lock, flags);
+	for (i = 0; i < devp->vb_queue.num_buffers && !ret; i++) {
+		vb = devp->vb_queue.bufs[i];
+		if (!vdin_v4l2_fits(devp, vb, &size) ||
+		    (streaming && !vdin_v4l2_fits(devp, vb, &devp->vdin_v4l2.run_size)))
+			ret = -ENOSPC;
+	}
+	spin_unlock_irqrestore(&devp->isr_lock, flags);
+	if (ret)
+		return ret;
 
 	if (!streaming) {
 		memcpy(devp->vdin_v4l2.sched, sched.inputs, num * sizeof(sched.inputs[0]));
 		devp->vdin_v4l2.sched_num = num > 1 ? num : 0;
+		devp->vdin_v4l2.size = size;
 		dprintk(1, "%s vdin%d %d taps\n", __func__, devp->index, num);
 		return 0;
 	}
@@ -943,6 +1014,14 @@ static int vdin_vidioc_s_input_schedule(struct vdin_dev_s *devp,
 	/* a stream that takes no turns restarts for a new list */
 	if (!devp->vdin_v4l2.sched_armed || devp->frontend != fe)
 		return -EOPNOTSUPP;
+	/* the running stream scales from the source size of its STREAMON */
+	line_buff = devp->index ? devp->dtdata->vdin1_line_buff_size :
+		    devp->dtdata->vdin0_line_buff_size;
+	if (sched.width > devp->h_active_org || sched.height > devp->v_active_org ||
+	    sched.width < roundup(devp->h_active_org / VDIN_V4L2_MAX_SHRINK + 1, 2) ||
+	    sched.height < roundup(devp->v_active_org / VDIN_V4L2_MAX_SHRINK + 1, 2) ||
+	    (sched.height != devp->v_active_org && sched.width > line_buff))
+		return -ERANGE;
 	add = vdin_v4l2_inputs(sched.inputs, num);
 	for (i = 0; i < VDIN_V4L2_INPUT_MAX; i++) {
 		if ((add & BIT(i)) &&
@@ -993,6 +1072,7 @@ static int vdin_vidioc_s_input_schedule(struct vdin_dev_s *devp,
 		}
 		memcpy(devp->vdin_v4l2.pend, sched.inputs, num * sizeof(sched.inputs[0]));
 		devp->vdin_v4l2.pend_num = num;
+		devp->vdin_v4l2.pend_size = size;
 		ret = 0;
 	}
 	spin_unlock_irqrestore(&devp->isr_lock, flags);
@@ -1404,6 +1484,7 @@ static int vdin_vidioc_s_input(struct file *file, void *priv, unsigned int i)
 	devp->v4l2_port_cur = devp->v4l2_port[i];
 	devp->vdin_v4l2.input = i;
 	devp->vdin_v4l2.sched_num = 0;
+	memset(&devp->vdin_v4l2.size, 0, sizeof(devp->vdin_v4l2.size));
 	devp->unstable_flag = false;
 
 	devp->work_mode = VDIN_WORK_MD_V4L;
@@ -1712,6 +1793,7 @@ static int vdin_v4l2_release(struct file *file)
 		devp->afbce_flag = devp->afbce_flag_backup;
 	devp->work_mode = VDIN_WORK_MD_NORMAL;
 	devp->vdin_v4l2.sched_num = 0;
+	memset(&devp->vdin_v4l2.size, 0, sizeof(devp->vdin_v4l2.size));
 #ifdef CONFIG_AMLOGIC_MEDIA_TVIN_HDMI
 	if (IS_HDMI_SRC(devp->v4l2_port_cur))
 		rx_update_edid_callback(devp->v4l2_port_cur, RX_EDID_DEFAULT);
@@ -1847,7 +1929,9 @@ static int vdin_vb2ops_buffer_prepare(struct vb2_buffer *vb)
 	unsigned int i;
 	unsigned long paddr;
 	unsigned long *addr;
-	bool started;
+	unsigned long flags;
+	struct vf_entry *vfe;
+	bool started, fits, moved = false;
 
 	if (IS_ERR_OR_NULL(devp))
 		return -EINVAL;
@@ -1858,10 +1942,18 @@ static int vdin_vb2ops_buffer_prepare(struct vb2_buffer *vb)
 		vb->num_planes, queue->queued_count,
 		vb2_buf_sts_to_str(vb->state));
 
-	/* vdin takes the buffer addresses when it starts; they must not move after */
 	started = vb2_start_streaming_called(queue);
 	if (vb->index >= devp->v4l2_req_buf_num)
 		return started ? -EINVAL : 0;
+	/* a queued buffer takes frames of the running and the pending size */
+	spin_lock_irqsave(&devp->isr_lock, flags);
+	fits = vdin_v4l2_fits(devp, vb, started ? &devp->vdin_v4l2.run_size :
+			      &devp->vdin_v4l2.size) &&
+	       (!started || !devp->vdin_v4l2.pend_num ||
+		vdin_v4l2_fits(devp, vb, &devp->vdin_v4l2.pend_size));
+	spin_unlock_irqrestore(&devp->isr_lock, flags);
+	if (!fits)
+		return -EINVAL;
 	for (i = 0; i < vb->num_planes; i++) {
 		paddr = roundup(vb2_dma_contig_plane_dma_addr(vb, i),
 				devp->canvas_align);
@@ -1869,12 +1961,14 @@ static int vdin_vb2ops_buffer_prepare(struct vb2_buffer *vb)
 			addr = &devp->vf_mem_start[vb->index];
 		else
 			addr = &devp->vf_mem_c_start[vb->index];
-		if (started && paddr != *addr) {
-			dprintk(0, "%s buf %d plane %u moved\n", __func__,
-				vb->index, i);
-			return -EINVAL;
-		}
+		if (started && paddr != *addr)
+			moved = true;
 		*addr = paddr;
+	}
+	/* the isr points a moved buffer's frame at it when it picks the frame */
+	if (moved) {
+		vfe = vf_get_master(devp->vfp, vb->index);
+		memset(&vfe->v4l2_size, 0, sizeof(vfe->v4l2_size));
 	}
 
 	//if (vb->num_planes > 1) {
@@ -2307,8 +2401,13 @@ int vdin_v4l2_start_tvin(struct vdin_dev_s *devp)
 	vdin_cap_param.cfmt			= devp->parm.info.cfmt;
 	vdin_cap_param.frame_rate   = devp->parm.info.fps;
 	vdin_cap_param.port         = devp->v4l2_port_cur;
-	vdin_cap_param.dest_h_active = devp->v4l2_fmt.fmt.pix_mp.width;
-	vdin_cap_param.dest_v_active = devp->v4l2_fmt.fmt.pix_mp.height;
+	vdin_v4l2_size_set(devp, &devp->vdin_v4l2.run_size,
+			   devp->vdin_v4l2.size.width ? devp->vdin_v4l2.size.width :
+			   devp->v4l2_fmt.fmt.pix_mp.width,
+			   devp->vdin_v4l2.size.width ? devp->vdin_v4l2.size.height :
+			   devp->v4l2_fmt.fmt.pix_mp.height);
+	vdin_cap_param.dest_h_active = devp->vdin_v4l2.run_size.width;
+	vdin_cap_param.dest_v_active = devp->vdin_v4l2.run_size.height;
 	//vdin_cap_param.reserved    |= PARAM_STATE_SCREEN_CAP;
 
 	if (vdin_v4l2_is_loopback(devp)) {
@@ -2331,21 +2430,21 @@ int vdin_v4l2_start_tvin(struct vdin_dev_s *devp)
 	}
 
 	/* S_FMT bounds the size, unless the output mode changed since */
-	if (devp->v4l2_fmt.fmt.pix_mp.width > vdin_cap_param.h_active ||
-		devp->v4l2_fmt.fmt.pix_mp.height > vdin_cap_param.v_active) {
+	if (vdin_cap_param.dest_h_active > vdin_cap_param.h_active ||
+		vdin_cap_param.dest_v_active > vdin_cap_param.v_active) {
 		dprintk(0, "%s,out of range!v4l2_fmt:%dx%d > active:%dx%d\n",
-			__func__, devp->v4l2_fmt.fmt.pix_mp.width,
-			devp->v4l2_fmt.fmt.pix_mp.height, vdin_cap_param.h_active,
+			__func__, vdin_cap_param.dest_h_active,
+			vdin_cap_param.dest_v_active, vdin_cap_param.h_active,
 			vdin_cap_param.v_active);
 		return -EINVAL;
 	}
 
-	if (devp->v4l2_fmt.fmt.pix_mp.width * VDIN_V4L2_MAX_SHRINK <= vdin_cap_param.h_active ||
-	    devp->v4l2_fmt.fmt.pix_mp.height * VDIN_V4L2_MAX_SHRINK <=
+	if (vdin_cap_param.dest_h_active * VDIN_V4L2_MAX_SHRINK <= vdin_cap_param.h_active ||
+	    vdin_cap_param.dest_v_active * VDIN_V4L2_MAX_SHRINK <=
 	    vdin_cap_param.v_active) {
 		dprintk(0, "%s,out of scale range!v4l2_fmt:%dx%d active:%dx%d\n",
-			__func__, devp->v4l2_fmt.fmt.pix_mp.width,
-			devp->v4l2_fmt.fmt.pix_mp.height, vdin_cap_param.h_active,
+			__func__, vdin_cap_param.dest_h_active,
+			vdin_cap_param.dest_v_active, vdin_cap_param.h_active,
 			vdin_cap_param.v_active);
 		return -EINVAL;
 	}

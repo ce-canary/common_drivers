@@ -2108,9 +2108,9 @@ void vdin_set_frame_mif_write_addr_s5(struct vdin_dev_s *devp,
 	else
 		hsize = devp->h_active;
 
-	stride_luma = devp->canvas_w >> 4;
+	stride_luma = vfe->vf.canvas0_config[0].width >> 4;
 	if (vfe->vf.plane_num == 2)
-		stride_chroma = devp->canvas_w >> 4;
+		stride_chroma = vfe->vf.canvas0_config[1].width >> 4;
 
 	/* one region mode only have one buffer RGB,YUV */
 	phy_addr_luma = vfe->vf.canvas0_config[0].phy_addr;
@@ -3308,6 +3308,12 @@ void vdin_set_hv_scale_s5(struct vdin_dev_s *devp)
 			vdin_set_hscale_s5(devp, devp->prop.scaling4w);
 	} else if (devp->h_active > VDIN_MAX_H_ACTIVE) {
 		vdin_set_hscale_s5(devp, VDIN_MAX_H_ACTIVE);
+	} else if (devp->vdin_v4l2.sched_armed) {
+		/* a live size change only enables the scaler set up here */
+		vdin_set_hscale_s5(devp, devp->h_active);
+		wr_bits(devp->addr_offset, VDIN_PP_TOP_CTRL, 0, PP_HSC_EN_BIT, PP_HSC_EN_WID);
+		wr_bits(devp->addr_offset, VDIN_PHSC_CTRL, 0, PP_PHSC_MODE_BIT,
+			PP_PHSC_MODE_WID);
 	}
 
 	if (devp->prop.scaling4h < devp->v_active &&
@@ -3319,6 +3325,17 @@ void vdin_set_hv_scale_s5(struct vdin_dev_s *devp)
 
 		if (devp->prop.scaling4h < devp->v_active)
 			vdin_set_vscale_s5(devp);
+	} else if (devp->vdin_v4l2.sched_armed) {
+		wr_bits(devp->addr_offset, VDIN_PP_TOP_GCLK_CTRL, 2,
+			PP_VSC_GCLK_CTRL_BIT, PP_VSC_GCLK_CTRL_WID);
+		wr_bits(devp->addr_offset, VDIN_VSC_CTRL, 0,
+			PP_VSC_PHASE0_ALWAS_EN_BIT, PP_VSC_PHASE0_ALWAS_EN_WID);
+		wr_bits(devp->addr_offset, VDIN_VSC_CTRL, 1, 0, 1);
+		wr_bits(devp->addr_offset, VDIN_VSC_INI_PHASE, 0x0,
+			VSCALER_INI_PHASE_BIT, VSCALER_INI_PHASE_WID);
+		wr_bits(devp->addr_offset, VDIN_VSC_CTRL, 0,
+			PP_VSC_SKIP_LINE_NUM_BIT, PP_VSC_SKIP_LINE_NUM_WID);
+		wr(devp->addr_offset, VDIN_VSC_DUMMY_DATA, 0x8080);
 	}
 
 set_hv_shrink:
