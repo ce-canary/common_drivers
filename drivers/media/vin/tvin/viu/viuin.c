@@ -22,6 +22,7 @@
 #include <linux/amlogic/media/vfm/vframe_provider.h>
 #include <linux/amlogic/media/vout/vout_notify.h>
 #include <linux/amlogic/media/frame_provider/tvin/tvin_v4l2.h>
+#include <linux/amlogic/media/rdma/rdma_mgr.h>
 
 #include "../tvin_global.h"
 #include "../tvin_frontend.h"
@@ -120,6 +121,28 @@ MODULE_PARM_DESC(open_cnt, "open_cnt for vdin0/1");
 /* both write-back channels program the registers below; one lock orders them */
 static DEFINE_SPINLOCK(viuin_lock);
 
+/* the registers an open programs: the tap selects of the channels, then
+ * the input word that both channels share, its width and port fields
+ */
+enum {
+	VIUIN_WB_VPP,
+	VIUIN_WB_VPP1,
+	VIUIN_WB_VPP2,
+	VIUIN_WB_VIU,
+	VIUIN_WB_HDN,
+	VIUIN_WB_NUM
+};
+
+static const u32 viuin_wb_reg[VIUIN_WB_NUM] = {
+	VPP_WR_BAK_CTRL, VPP1_WR_BAK_CTRL, VPP2_WR_BAK_CTRL,
+	VIU_WR_BAK_CTRL, VPU_VIU2VDIN_HDN_CTRL
+};
+
+struct viuin_wb_fields {
+	u32 val[VIUIN_WB_NUM];
+	u32 mask[VIUIN_WB_NUM];
+};
+
 struct viuin_s {
 	unsigned int flag;
 	struct vframe_prop_s *prop;
@@ -130,11 +153,27 @@ struct viuin_s {
 	unsigned int viu_mux;
 	/* the write-back channels this frontend reads */
 	unsigned int chans;
-	/* per bound input: its tap and its channel */
+	/* per bound input: its tap, its channel and the fields its port sets
+	 * on each channel; base holds the input word fields every open sets,
+	 * swc the channel whose tap field this frontend's table switches
+	 */
 	unsigned int bound;
 	enum tvin_port_e tap[TVIN_TAP_MAX];
 	unsigned int chan[TVIN_TAP_MAX];
+	struct viuin_wb_fields wb[TVIN_TAP_MAX][VIUIN_CHAN_MAX];
+	struct viuin_wb_fields base;
+	unsigned int swc;
 };
+
+/* the value each register takes once every queued write lands; viuin is
+ * their only writer. While a frontend switches a tap field only its rdma
+ * table writes them, so a cpu write cannot land between its entries.
+ */
+static struct {
+	u32 val[VIUIN_WB_NUM];
+	u32 valid;
+	struct viuin_s *writer;
+} viuin_wb;
 
 /* a channel carries one tap to every reader; the vdin1 histogram is one */
 static struct {
@@ -176,6 +215,42 @@ static inline u32 rd_bits_viu(u32 reg,
 	val = ((aml_read_vcbus(reg) >> (start)) & ((1L << (len)) - 1));
 
 	return val;
+}
+
+static inline void wb_bits(struct viuin_wb_fields *wb, unsigned int i,
+			   const u32 value, const u32 start, const u32 len)
+{
+	u32 mask = ((1L << len) - 1) << start;
+
+	wb->val[i] = (wb->val[i] & ~mask) | ((value << start) & mask);
+	wb->mask[i] |= mask;
+}
+
+/* under viuin_lock */
+static u32 viuin_wb_get(unsigned int i)
+{
+	if (!(viuin_wb.valid & BIT(i))) {
+		viuin_wb.val[i] = rd_viu(viuin_wb_reg[i]);
+		viuin_wb.valid |= BIT(i);
+	}
+	return viuin_wb.val[i];
+}
+
+/* under viuin_lock; while a table writes the registers it carries the change */
+static void viuin_wb_set(unsigned int i, u32 val)
+{
+	viuin_wb_get(i);
+	viuin_wb.val[i] = val;
+	if (!viuin_wb.writer)
+		wr_viu(viuin_wb_reg[i], val);
+}
+
+static void viuin_wb_bits(unsigned int i, const u32 value, const u32 start,
+			  const u32 len)
+{
+	u32 mask = ((1L << len) - 1) << start;
+
+	viuin_wb_set(i, (viuin_wb_get(i) & ~mask) | ((value << start) & mask));
 }
 
 static bool viuin_is_wb1(enum tvin_port_e port)
@@ -251,7 +326,8 @@ int viuin_select_loopback_path(void)
 
 	spin_lock_irqsave(&viuin_lock, flags);
 	if (!viuin_hist && viuin_chan[0].readers &&
-	    viuin_chan[0].tap != TVIN_PORT_VIU1_WB0_VPP)
+	    (viuin_chan[0].tap != TVIN_PORT_VIU1_WB0_VPP ||
+	     (viuin_wb.writer && !viuin_wb.writer->swc)))
 		ret = -EBUSY;
 	if (viuin_hist || ret)
 		goto out;
@@ -262,8 +338,8 @@ int viuin_select_loopback_path(void)
 	/* set VPU_VIU_VDIN_IF_MUX_CTRL */
 	wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL_T3X, 0x808, 0, 16);
 	/* set VPP_WRBAK_CTRL */
-	wr_bits_viu(VPP_WR_BAK_CTRL, 6, 0, 4);
-	wr_bits_viu(VPP_WR_BAK_CTRL, 0xff, 16, 8);
+	viuin_wb_bits(VIUIN_WB_VPP, 6, 0, 4);
+	viuin_wb_bits(VIUIN_WB_VPP, 0xff, 16, 8);
 	/* wrback hsync en */
 	//if (port >= TVIN_PORT_VIU1_VIDEO &&
 	//    port <= TVIN_PORT_VIU1_WB0_POST_BLEND) {
@@ -289,7 +365,7 @@ void viuin_clear_loopback_path(void)
 		viuin_hist = false;
 		if (!--viuin_chan[0].readers) {
 			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, 0, 0, 16);
-			wr_bits_viu(VPP_WR_BAK_CTRL, 0, 0, 4);
+			viuin_wb_bits(VIUIN_WB_VPP, 0, 0, 4);
 		}
 	}
 	spin_unlock_irqrestore(&viuin_lock, flags);
@@ -394,7 +470,7 @@ static void viuin_set_vdin_if_mux_ctrl(enum tvin_port_e port)
 }
 
 #ifndef CONFIG_AMLOGIC_ZAPPER_CUT
-static void viuin_set_wr_bak_ctrl_s5(enum tvin_port_e port)
+static void viuin_set_wr_bak_ctrl_s5(enum tvin_port_e port, struct viuin_wb_fields *wb)
 {
 	const struct vinfo_s *vinfo = NULL;
 
@@ -405,40 +481,40 @@ static void viuin_set_wr_bak_ctrl_s5(enum tvin_port_e port)
 		pr_info("cur_enc_ppc = %d\n", vinfo->cur_enc_ppc);
 
 	/* wr_bak use 4ppc always on S5 */
-	wr_bits_viu(VPU_VIU2VDIN_HDN_CTRL, 3, 21, 2);
-	wr_bits_viu(VPU_VIU2VDIN_HDN_CTRL, 2, 30, 2);
+	wb_bits(wb, VIUIN_WB_HDN, 3, 21, 2);
+	wb_bits(wb, VIUIN_WB_HDN, 2, 30, 2);
 
 	switch (port) {
 	/* wr_bak_chan1_sel wb_chan_sel*/
 	//wr_bak_chan0_sel : 0:vd1 1:vd2 2:vd3 3:osd1 4:osd2 5:post_blend_out;
 	case TVIN_PORT_VIU1_WB0_VD1:
-		wr_bits_viu(VIU_WR_BAK_CTRL, 0, 0, 4);
+		wb_bits(wb, VIUIN_WB_VIU, 0, 0, 4);
 		break;
 	case TVIN_PORT_VIU1_WB0_VD2:
-		wr_bits_viu(VIU_WR_BAK_CTRL, 1, 0, 4);
+		wb_bits(wb, VIUIN_WB_VIU, 1, 0, 4);
 		break;
 	case TVIN_PORT_VIU1_WB0_OSD1:
-		wr_bits_viu(VIU_WR_BAK_CTRL, 3, 0, 4);
+		wb_bits(wb, VIUIN_WB_VIU, 3, 0, 4);
 		break;
 	case TVIN_PORT_VIU1_WB0_OSD2:
-		wr_bits_viu(VIU_WR_BAK_CTRL, 4, 0, 4);
+		wb_bits(wb, VIUIN_WB_VIU, 4, 0, 4);
 		break;
 	case TVIN_PORT_VIU1_WB0_VPP://s5 no vppout
 	case TVIN_PORT_VIU1_WB0_POST_BLEND:
-		wr_bits_viu(VIU_WR_BAK_CTRL, 5, 0, 4);
+		wb_bits(wb, VIUIN_WB_VIU, 5, 0, 4);
 		if (vinfo && vinfo->cur_enc_ppc == 4) { //4 slice
-			wr_bits_viu(VPU_VIU2VDIN_HDN_CTRL, 0, 26, 2);
+			wb_bits(wb, VIUIN_WB_HDN, 0, 26, 2);
 			//wr_bits_viu(VPU_VIU2VDIN_HDN_CTRL, 2, 30, 2);
 		} else if (vinfo && vinfo->cur_enc_ppc == 2) { //2 slice
-			wr_bits_viu(VPU_VIU2VDIN_HDN_CTRL, 1, 26, 2);
+			wb_bits(wb, VIUIN_WB_HDN, 1, 26, 2);
 			//wr_bits_viu(VPU_VIU2VDIN_HDN_CTRL, 1, 30, 2);
 		} else { //1 slice
-			wr_bits_viu(VPU_VIU2VDIN_HDN_CTRL, 0, 26, 2);
+			wb_bits(wb, VIUIN_WB_HDN, 0, 26, 2);
 			//wr_bits_viu(VPU_VIU2VDIN_HDN_CTRL, 2, 30, 2);
 		}
 		break;
 	case TVIN_PORT_VIU1_VIDEO:
-		wr_bits_viu(VIU_WR_BAK_CTRL, 7, 0, 4);
+		wb_bits(wb, VIUIN_WB_VIU, 7, 0, 4);
 		break;
 	/* wr_bak_chan1_sel wb_chan_sel*/
 	case TVIN_PORT_VIU1_WB1_VD1:
@@ -452,55 +528,55 @@ static void viuin_set_wr_bak_ctrl_s5(enum tvin_port_e port)
 	case TVIN_PORT_VIU2_ENCL:
 	case TVIN_PORT_VIU2_ENCI:
 	case TVIN_PORT_VIU2_ENCP:
-		wr_bits_viu(VIU_WR_BAK_CTRL, 6, 0, 4);
+		wb_bits(wb, VIUIN_WB_VIU, 6, 0, 4);
 
 		/* increase h banking in case vdin afifo overflow
 		 * pre chip has 8bits
 		 * tm2_revb increased 4bits, all 12bit
 		 */
-		wr_bits_viu(VIU_WR_BAK_CTRL, 0xff, 16, 8);
+		wb_bits(wb, VIUIN_WB_VIU, 0xff, 16, 8);
 		break;
 	case TVIN_PORT_VIU2_VD1:
-		wr_bits_viu(VPP1_WR_BAK_CTRL, 1, 0, 2);
+		wb_bits(wb, VIUIN_WB_VPP1, 1, 0, 2);
 		break;
 	case TVIN_PORT_VIU2_OSD1:
-		wr_bits_viu(VPP1_WR_BAK_CTRL, 2, 0, 2);
+		wb_bits(wb, VIUIN_WB_VPP1, 2, 0, 2);
 		break;
 	case TVIN_PORT_VIU2_VPP:
-		wr_bits_viu(VPP1_WR_BAK_CTRL, 3, 0, 2);
+		wb_bits(wb, VIUIN_WB_VPP1, 3, 0, 2);
 		break;
 	case TVIN_PORT_VIU3_VD1:
-		wr_bits_viu(VPP2_WR_BAK_CTRL, 1, 0, 2);
+		wb_bits(wb, VIUIN_WB_VPP2, 1, 0, 2);
 		break;
 	case TVIN_PORT_VIU3_OSD1:
-		wr_bits_viu(VPP2_WR_BAK_CTRL, 2, 0, 2);
+		wb_bits(wb, VIUIN_WB_VPP2, 2, 0, 2);
 		break;
 	case TVIN_PORT_VIU3_VPP:
-		wr_bits_viu(VPP2_WR_BAK_CTRL, 3, 0, 2);
+		wb_bits(wb, VIUIN_WB_VPP2, 3, 0, 2);
 		break;
 	case TVIN_PORT_VENC0:
 	case TVIN_PORT_VENC1:
 	case TVIN_PORT_VENC2:
 		if (vinfo && vinfo->cur_enc_ppc == 4) { //4 slice
-			wr_bits_viu(VPU_VIU2VDIN_HDN_CTRL, 2, 26, 2);
-			wr_bits_viu(VPU_VIU2VDIN_HDN_CTRL, 2, 30, 2);
+			wb_bits(wb, VIUIN_WB_HDN, 2, 26, 2);
+			wb_bits(wb, VIUIN_WB_HDN, 2, 30, 2);
 		} else if (vinfo && vinfo->cur_enc_ppc == 2) { //2 slice
-			wr_bits_viu(VPU_VIU2VDIN_HDN_CTRL, 1, 26, 2);
-			wr_bits_viu(VPU_VIU2VDIN_HDN_CTRL, 1, 30, 2);
+			wb_bits(wb, VIUIN_WB_HDN, 1, 26, 2);
+			wb_bits(wb, VIUIN_WB_HDN, 1, 30, 2);
 		} else { //1 slice
-			wr_bits_viu(VPU_VIU2VDIN_HDN_CTRL, 0, 26, 2);
-			wr_bits_viu(VPU_VIU2VDIN_HDN_CTRL, 0, 30, 2);
+			wb_bits(wb, VIUIN_WB_HDN, 0, 26, 2);
+			wb_bits(wb, VIUIN_WB_HDN, 0, 30, 2);
 		}
 		break;
 	default:
-		wr_bits_viu(VIU_WR_BAK_CTRL, 0, viuin_is_wb1(port) ? 4 : 0, 4);
-		wr_bits_viu(VPP1_WR_BAK_CTRL, 0, 0, 2);
-		wr_bits_viu(VPP2_WR_BAK_CTRL, 0, 0, 2);
+		wb_bits(wb, VIUIN_WB_VIU, 0, viuin_is_wb1(port) ? 4 : 0, 4);
+		wb_bits(wb, VIUIN_WB_VPP1, 0, 0, 2);
+		wb_bits(wb, VIUIN_WB_VPP2, 0, 0, 2);
 		break;
 	}
 }
 
-static void viuin_set_wr_bak_ctrl_t3x(enum tvin_port_e port)
+static void viuin_set_wr_bak_ctrl_t3x(enum tvin_port_e port, struct viuin_wb_fields *wb)
 {
 	bool fixed_din_mode = true;/* vpp or venc may have 1 or 2slice input */
 	const struct vinfo_s *vinfo = NULL;
@@ -511,39 +587,39 @@ static void viuin_set_wr_bak_ctrl_t3x(enum tvin_port_e port)
 	} else {
 		pr_info("ppc:%d,w:%d,h:%d,dur:%d\n", vinfo->cur_enc_ppc,
 			vinfo->width, vinfo->height, vinfo->std_duration);
-		wr_viu(VPU_VIU2VDIN_HDN_CTRL, vinfo->width);
+		wb_bits(wb, VIUIN_WB_HDN, vinfo->width, 0, 32);
 	}
 
 	switch (port) {
 	/* wr_bak_chan1_sel wb_chan_sel*/
 	//wr_bak_chan0_sel : 0:vd1 1:vd2 2:vd3 3:osd1 4:osd2 5:post_blend_out;
 	case TVIN_PORT_VIU1_WB0_VD1:
-		wr_bits_viu(VIU_WR_BAK_CTRL, T3X_WRBACK_VPP_POST_VD1, 0, 4);
+		wb_bits(wb, VIUIN_WB_VIU, T3X_WRBACK_VPP_POST_VD1, 0, 4);
 		break;
 	case TVIN_PORT_VIU1_WB0_VD2:
-		wr_bits_viu(VIU_WR_BAK_CTRL, T3X_WRBACK_VPP_POST_VD2, 0, 4);
+		wb_bits(wb, VIUIN_WB_VIU, T3X_WRBACK_VPP_POST_VD2, 0, 4);
 		break;
 	case TVIN_PORT_VIU1_WB0_VD3:
-		wr_bits_viu(VIU_WR_BAK_CTRL, T3X_WRBACK_VPP_POST_VD3, 0, 4);
+		wb_bits(wb, VIUIN_WB_VIU, T3X_WRBACK_VPP_POST_VD3, 0, 4);
 		break;
 	case TVIN_PORT_VIU1_WB0_OSD1:
-		wr_bits_viu(VIU_WR_BAK_CTRL, T3X_WRBACK_VPP_POST_OSD1, 0, 4);
+		wb_bits(wb, VIUIN_WB_VIU, T3X_WRBACK_VPP_POST_OSD1, 0, 4);
 		break;
 	case TVIN_PORT_VIU1_WB0_OSD2:
-		wr_bits_viu(VIU_WR_BAK_CTRL, T3X_WRBACK_VPP_POST_OSD2, 0, 4);
+		wb_bits(wb, VIUIN_WB_VIU, T3X_WRBACK_VPP_POST_OSD2, 0, 4);
 		break;
 	case TVIN_PORT_VIU1_WB0_OSD3:
-		wr_bits_viu(VIU_WR_BAK_CTRL, T3X_WRBACK_VPP_POST_OSD3, 0, 4);
+		wb_bits(wb, VIUIN_WB_VIU, T3X_WRBACK_VPP_POST_OSD3, 0, 4);
 		break;
 	case TVIN_PORT_VIU1_WB0_VPP:
 		fixed_din_mode = false;
-		wr_bits_viu(VIU_WR_BAK_CTRL, T3X_WRBACK_VPP_POST_OUT, 0, 4);
+		wb_bits(wb, VIUIN_WB_VIU, T3X_WRBACK_VPP_POST_OUT, 0, 4);
 		break;
 	case TVIN_PORT_VIU1_WB0_POST_BLEND:
-		wr_bits_viu(VIU_WR_BAK_CTRL, T3X_WRBACK_VPP0_POST_BLD_OUT, 0, 4);
+		wb_bits(wb, VIUIN_WB_VIU, T3X_WRBACK_VPP0_POST_BLD_OUT, 0, 4);
 		break;
 	case TVIN_PORT_VIU1_VIDEO:
-		wr_bits_viu(VIU_WR_BAK_CTRL, T3X_WRBACK_VPP_POST_VD1_BEFORE, 0, 4);
+		wb_bits(wb, VIUIN_WB_VIU, T3X_WRBACK_VPP_POST_VD1_BEFORE, 0, 4);
 		break;
 	/* wr_bak_chan1_sel wb_chan_sel*/
 	case TVIN_PORT_VIU1_WB1_VD1:
@@ -560,7 +636,7 @@ static void viuin_set_wr_bak_ctrl_t3x(enum tvin_port_e port)
 	case TVIN_PORT_VIU2_VD1:
 	case TVIN_PORT_VIU2_OSD1:
 	case TVIN_PORT_VIU2_VPP:
-		wr_bits_viu(VIU_WR_BAK_CTRL, T3X_WRBACK_VPP1_POST_BLD_OUT, 0, 4);
+		wb_bits(wb, VIUIN_WB_VIU, T3X_WRBACK_VPP1_POST_BLD_OUT, 0, 4);
 		break;
 	case TVIN_PORT_VIU3_VD1:
 	case TVIN_PORT_VIU3_OSD1:
@@ -573,42 +649,42 @@ static void viuin_set_wr_bak_ctrl_t3x(enum tvin_port_e port)
 		break;
 	default:
 		pr_info("do not support prot = %#x\n", port);
-		wr_bits_viu(VIU_WR_BAK_CTRL, 9, 0, 4);
+		wb_bits(wb, VIUIN_WB_VIU, 9, 0, 4);
 		break;
 	}
 
 	if (vinfo && vinfo->width * vinfo->height * vinfo->std_duration >
 		VDIN_LITE_CORE_MAX_PIXEL_CLOCK) { //need skip
 		/* din_mode,2ppc */
-		wr_bits_viu(VPU_VIU2VDIN_HDN_CTRL, 1, 30, 2);
+		wb_bits(wb, VIUIN_WB_HDN, 1, 30, 2);
 		/* vskip:1 */
-		wr_bits_viu(VPU_VIU2VDIN_HDN_CTRL, 1, 24, 1);
+		wb_bits(wb, VIUIN_WB_HDN, 1, 24, 1);
 		/* dout_mode:2 */
-		wr_bits_viu(VPU_VIU2VDIN_HDN_CTRL, 2, 21, 2);
+		wb_bits(wb, VIUIN_WB_HDN, 2, 21, 2);
 		/* dn_ratio:1 */
-		wr_bits_viu(VPU_VIU2VDIN_HDN_CTRL, 1, 18, 2);
+		wb_bits(wb, VIUIN_WB_HDN, 1, 18, 2);
 	} else if (!fixed_din_mode) {
 		if (vinfo->cur_enc_ppc == 2)
-			wr_bits_viu(VPU_VIU2VDIN_HDN_CTRL, 1, 30, 2);/* 2ppc */
+			wb_bits(wb, VIUIN_WB_HDN, 1, 30, 2);/* 2ppc */
 		else
-			wr_bits_viu(VPU_VIU2VDIN_HDN_CTRL, 0, 30, 2);/* 1ppc */
-		wr_bits_viu(VPU_VIU2VDIN_HDN_CTRL, 3, 21, 2);/* 4ppc */
+			wb_bits(wb, VIUIN_WB_HDN, 0, 30, 2);/* 1ppc */
+		wb_bits(wb, VIUIN_WB_HDN, 3, 21, 2);/* 4ppc */
 	} else { //din_mode fixed 2 slice input
-		wr_bits_viu(VPU_VIU2VDIN_HDN_CTRL, 1, 30, 2);/* 2ppc */
-		wr_bits_viu(VPU_VIU2VDIN_HDN_CTRL, 3, 21, 2);/* 4ppc */
+		wb_bits(wb, VIUIN_WB_HDN, 1, 30, 2);/* 2ppc */
+		wb_bits(wb, VIUIN_WB_HDN, 3, 21, 2);/* 4ppc */
 	}
 
 }
 #endif
 
-static void viuin_set_wr_bak_ctrl(enum tvin_port_e port)
+static void viuin_set_wr_bak_ctrl(enum tvin_port_e port, struct viuin_wb_fields *wb)
 {
 #ifndef CONFIG_AMLOGIC_ZAPPER_CUT
 	if (is_meson_s5_cpu()) {
-		viuin_set_wr_bak_ctrl_s5(port);
+		viuin_set_wr_bak_ctrl_s5(port, wb);
 		return;
 	} else if (is_meson_t3x_cpu()) {
-		viuin_set_wr_bak_ctrl_t3x(port);
+		viuin_set_wr_bak_ctrl_t3x(port, wb);
 		return;
 	}
 #endif
@@ -616,116 +692,116 @@ static void viuin_set_wr_bak_ctrl(enum tvin_port_e port)
 	switch (port) {
 	/* wr_bak_chan1_sel wb_chan_sel*/
 	case TVIN_PORT_VIU1_WB0_VD1:
-		wr_bits_viu(VPP_WR_BAK_CTRL, 1, 0, 4);
+		wb_bits(wb, VIUIN_WB_VPP, 1, 0, 4);
 		break;
 	case TVIN_PORT_VIU1_WB0_VD2:
-		wr_bits_viu(VPP_WR_BAK_CTRL, 2, 0, 4);
+		wb_bits(wb, VIUIN_WB_VPP, 2, 0, 4);
 		break;
 	case TVIN_PORT_VIU1_WB0_OSD1:
-		wr_bits_viu(VPP_WR_BAK_CTRL, 3, 0, 4);
+		wb_bits(wb, VIUIN_WB_VPP, 3, 0, 4);
 #ifndef CONFIG_AMLOGIC_ZAPPER_CUT
 		if (is_meson_txhd2_cpu() && rd_bits_viu(VPP_MISC, 27, 1))
-			wr_bits_viu(VPP_WR_BAK_CTRL, 1, 11, 1);
+			wb_bits(wb, VIUIN_WB_VPP, 1, 11, 1);
 #endif
 		break;
 	case TVIN_PORT_VIU1_WB0_OSD2:
-		wr_bits_viu(VPP_WR_BAK_CTRL, 4, 0, 4);
+		wb_bits(wb, VIUIN_WB_VPP, 4, 0, 4);
 		break;
 	case TVIN_PORT_VIU1_WB0_POST_BLEND:
-		wr_bits_viu(VPP_WR_BAK_CTRL, 5, 0, 4);
+		wb_bits(wb, VIUIN_WB_VPP, 5, 0, 4);
 #ifndef CONFIG_AMLOGIC_ZAPPER_CUT
 		if (is_meson_txhd2_cpu() && rd_bits_viu(VPP_MISC, 27, 1))
-			wr_bits_viu(VPP_WR_BAK_CTRL, 1, 11, 1);
+			wb_bits(wb, VIUIN_WB_VPP, 1, 11, 1);
 #endif
 		break;
 	case TVIN_PORT_VIU1_WB0_VPP:
-		wr_bits_viu(VPP_WR_BAK_CTRL, 6, 0, 4);
+		wb_bits(wb, VIUIN_WB_VPP, 6, 0, 4);
 
 		/* increase h banking in case vdin afifo overflow
 		 * pre chip has 8bits
 		 * tm2_revb increased 4bits, all 12bit
 		 */
-		wr_bits_viu(VPP_WR_BAK_CTRL, 0xff, 16, 8);
+		wb_bits(wb, VIUIN_WB_VPP, 0xff, 16, 8);
 #ifndef CONFIG_AMLOGIC_ZAPPER_CUT
 		if (is_meson_txhd2_cpu() && rd_bits_viu(VPP_MISC, 27, 1))
-			wr_bits_viu(VPP_WR_BAK_CTRL, 1, 11, 1);
+			wb_bits(wb, VIUIN_WB_VPP, 1, 11, 1);
 #endif
 		break;
 	case TVIN_PORT_VIU1_VIDEO:
-		wr_bits_viu(VPP_WR_BAK_CTRL, 7, 0, 4);
+		wb_bits(wb, VIUIN_WB_VPP, 7, 0, 4);
 		break;
 	/* wr_bak_chan1_sel wb_chan_sel*/
 	case TVIN_PORT_VIU1_WB1_VD1:
-		wr_bits_viu(VPP_WR_BAK_CTRL, 1, 4, 4);
+		wb_bits(wb, VIUIN_WB_VPP, 1, 4, 4);
 		break;
 	case TVIN_PORT_VIU1_WB1_VD2:
-		wr_bits_viu(VPP_WR_BAK_CTRL, 2, 4, 4);
+		wb_bits(wb, VIUIN_WB_VPP, 2, 4, 4);
 		break;
 	case TVIN_PORT_VIU1_WB1_OSD1:
-		wr_bits_viu(VPP_WR_BAK_CTRL, 3, 4, 4);
+		wb_bits(wb, VIUIN_WB_VPP, 3, 4, 4);
 		break;
 	case TVIN_PORT_VIU1_WB1_OSD2:
-		wr_bits_viu(VPP_WR_BAK_CTRL, 4, 4, 4);
+		wb_bits(wb, VIUIN_WB_VPP, 4, 4, 4);
 		break;
 	case TVIN_PORT_VIU1_WB1_POST_BLEND:
-		wr_bits_viu(VPP_WR_BAK_CTRL, 5, 4, 4);
+		wb_bits(wb, VIUIN_WB_VPP, 5, 4, 4);
 		break;
 	case TVIN_PORT_VIU1_WB1_VPP:
-		wr_bits_viu(VPP_WR_BAK_CTRL, 6, 4, 4);
+		wb_bits(wb, VIUIN_WB_VPP, 6, 4, 4);
 
 		/* increase h banking in case vdin afifo overflow
 		 * pre chip has 8bits
 		 * tm2_revb increased 4bits, all 12bit
 		 */
-		wr_bits_viu(VPP_WR_BAK_CTRL, 0xff, 16, 8);
+		wb_bits(wb, VIUIN_WB_VPP, 0xff, 16, 8);
 		break;
 	case TVIN_PORT_VIU1_WB1_VIDEO:
-		wr_bits_viu(VPP_WR_BAK_CTRL, 7, 4, 4);
+		wb_bits(wb, VIUIN_WB_VPP, 7, 4, 4);
 		break;
 	case TVIN_PORT_VIU2_ENCL:
 	case TVIN_PORT_VIU2_ENCI:
 	case TVIN_PORT_VIU2_ENCP:
-		wr_bits_viu(VPP_WR_BAK_CTRL, 6, 0, 4);
+		wb_bits(wb, VIUIN_WB_VPP, 6, 0, 4);
 
 		/* increase h banking in case vdin afifo overflow
 		 * pre chip has 8bits
 		 * tm2_revb increased 4bits, all 12bit
 		 */
-		wr_bits_viu(VPP_WR_BAK_CTRL, 0xff, 16, 8);
+		wb_bits(wb, VIUIN_WB_VPP, 0xff, 16, 8);
 		break;
 	case TVIN_PORT_VIU2_VD1:
-		wr_bits_viu(VPP1_WR_BAK_CTRL, 1, 0, 2);
+		wb_bits(wb, VIUIN_WB_VPP1, 1, 0, 2);
 		break;
 	case TVIN_PORT_VIU2_OSD1:
-		wr_bits_viu(VPP1_WR_BAK_CTRL, 2, 0, 2);
+		wb_bits(wb, VIUIN_WB_VPP1, 2, 0, 2);
 		break;
 	case TVIN_PORT_VIU2_VPP:
-		wr_bits_viu(VPP1_WR_BAK_CTRL, 3, 0, 2);
+		wb_bits(wb, VIUIN_WB_VPP1, 3, 0, 2);
 		break;
 	case TVIN_PORT_VIU3_VD1:
-		wr_bits_viu(VPP2_WR_BAK_CTRL, 1, 0, 2);
+		wb_bits(wb, VIUIN_WB_VPP2, 1, 0, 2);
 		break;
 	case TVIN_PORT_VIU3_OSD1:
-		wr_bits_viu(VPP2_WR_BAK_CTRL, 2, 0, 2);
+		wb_bits(wb, VIUIN_WB_VPP2, 2, 0, 2);
 		break;
 	case TVIN_PORT_VIU3_VPP:
-		wr_bits_viu(VPP2_WR_BAK_CTRL, 3, 0, 2);
+		wb_bits(wb, VIUIN_WB_VPP2, 3, 0, 2);
 		break;
 	case TVIN_PORT_VENC0:
 	case TVIN_PORT_VENC1:
 	case TVIN_PORT_VENC2:
-		wr_bits_viu(VPP_WR_BAK_CTRL, 6, 0, 4);
+		wb_bits(wb, VIUIN_WB_VPP, 6, 0, 4);
 
 		/* increase h banking in case vdin afifo overflow
 		 * pre chip has 8bits
 		 * tm2_revb increased 4bits, all 12bit
 		 */
-		wr_bits_viu(VPP_WR_BAK_CTRL, 0xff, 16, 8);
+		wb_bits(wb, VIUIN_WB_VPP, 0xff, 16, 8);
 		break;
 	default:
-		wr_bits_viu(VPP_WR_BAK_CTRL, 0, viuin_is_wb1(port) ? 4 : 0, 4);
-		wr_bits_viu(VPP1_WR_BAK_CTRL, 0, 0, 2);
-		wr_bits_viu(VPP2_WR_BAK_CTRL, 0, 0, 2);
+		wb_bits(wb, VIUIN_WB_VPP, 0, viuin_is_wb1(port) ? 4 : 0, 4);
+		wb_bits(wb, VIUIN_WB_VPP1, 0, 0, 2);
+		wb_bits(wb, VIUIN_WB_VPP2, 0, 0, 2);
 		break;
 	}
 }
@@ -744,8 +820,8 @@ static void viuin_put_chans(unsigned int chans)
 		wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, 0, c ? 16 : 0, 16);
 #ifndef CONFIG_AMLOGIC_ZAPPER_CUT
 		/* txhd2 keystone path close */
-		if (is_meson_txhd2_cpu() && rd_bits_viu(VPP_WR_BAK_CTRL, 11, 1))
-			wr_bits_viu(VPP_WR_BAK_CTRL, 0, 11, 1);
+		if (is_meson_txhd2_cpu() && (viuin_wb_get(VIUIN_WB_VPP) & BIT(11)))
+			viuin_wb_bits(VIUIN_WB_VPP, 0, 11, 1);
 #endif
 	}
 }
@@ -757,16 +833,29 @@ static int viuin_bind(struct viuin_s *devp, enum tvin_port_e *ports, unsigned in
 {
 	unsigned int *chan = devp->chan;
 	unsigned int chans = devp->chans;
+	struct viuin_wb_fields *wb;
+	unsigned int sw = VIUIN_CHAN_MAX;
 	unsigned int fresh = 0;
 	enum tvin_port_e port, tap;
-	unsigned int c, i;
+	unsigned int c, i, r;
+	u32 m;
 	int ret = 0;
 
 	for (i = 0; i < TVIN_TAP_MAX; i++) {
 		if (!(mask & BIT(i)))
 			continue;
-		tap = viuin_tap(ports[i]);
-		devp->tap[i] = tap;
+		devp->tap[i] = viuin_tap(ports[i]);
+		for (c = 0; c < viuin_chans; c++) {
+			memset(&devp->wb[i][c], 0, sizeof(devp->wb[i][c]));
+			if (cpu_after_eq(MESON_CPU_MAJOR_ID_G12A))
+				viuin_set_wr_bak_ctrl(viuin_chan_port(ports[i], c),
+						      &devp->wb[i][c]);
+		}
+	}
+	for (i = 0; i < TVIN_TAP_MAX; i++) {
+		if (!(mask & BIT(i)))
+			continue;
+		tap = devp->tap[i];
 		/* the channel that carries the tap, else a free one; a port
 		 * that is no write-back tap has its own channel. A switched
 		 * channel carries no other tap.
@@ -775,7 +864,8 @@ static int viuin_bind(struct viuin_s *devp, enum tvin_port_e *ports, unsigned in
 		for (c = 0; c < viuin_chans; c++) {
 			if (!viuin_is_tap(tap) && c != viuin_is_wb1(ports[i]))
 				continue;
-			if (viuin_chan[c].readers && viuin_chan[c].tap == tap) {
+			if (viuin_chan[c].readers && viuin_chan[c].tap == tap &&
+			    !(viuin_wb.writer && viuin_wb.writer->swc == c)) {
 				chan[i] = c;
 				break;
 			}
@@ -783,8 +873,6 @@ static int viuin_bind(struct viuin_s *devp, enum tvin_port_e *ports, unsigned in
 				chan[i] = c;
 		}
 		c = chan[i];
-		if (c == VIUIN_CHAN_MAX)
-			ret = -EBUSY;
 		if (c == VIUIN_CHAN_MAX || (devp->chans & BIT(c)))
 			continue;
 		devp->chans |= BIT(c);
@@ -792,6 +880,23 @@ static int viuin_bind(struct viuin_s *devp, enum tvin_port_e *ports, unsigned in
 			viuin_chan[c].tap = tap;
 			fresh |= BIT(c);
 		}
+	}
+	/* more taps than channels: one table switches the tap field of a
+	 * channel only this frontend reads. The fields share one word, so only
+	 * one such table runs.
+	 */
+	for (i = 0; i < TVIN_TAP_MAX; i++) {
+		if (!(mask & BIT(i)) || chan[i] != VIUIN_CHAN_MAX)
+			continue;
+		/* the highest such channel; 0 serves the histogram */
+		c = VIUIN_CHAN_MAX;
+		while (sw == VIUIN_CHAN_MAX && !viuin_wb.writer && c--) {
+			if ((fresh & BIT(c)) && viuin_is_tap(viuin_chan[c].tap))
+				sw = c;
+		}
+		if (sw == VIUIN_CHAN_MAX || !viuin_is_tap(devp->tap[i]))
+			ret = -EBUSY;
+		chan[i] = sw;
 	}
 	if (ret) {
 		for (c = 0; c < VIUIN_CHAN_MAX; c++) {
@@ -806,12 +911,48 @@ static int viuin_bind(struct viuin_s *devp, enum tvin_port_e *ports, unsigned in
 		if (mask & BIT(i))
 			ports[i] = viuin_chan_port(ports[i], chan[i]);
 	}
+	/* a switched input carries every input word field another one sets */
+	m = 0;
+	for (i = 0; i < TVIN_TAP_MAX && sw != VIUIN_CHAN_MAX; i++) {
+		if ((devp->bound & BIT(i)) && chan[i] == sw)
+			m |= devp->wb[i][sw].mask[VIUIN_WB_HDN];
+	}
+	for (i = 0; i < TVIN_TAP_MAX && m; i++) {
+		if (!(devp->bound & BIT(i)) || chan[i] != sw)
+			continue;
+		wb = &devp->wb[i][sw];
+		wb->val[VIUIN_WB_HDN] |= devp->base.val[VIUIN_WB_HDN] & m &
+					 ~wb->mask[VIUIN_WB_HDN];
+		wb->mask[VIUIN_WB_HDN] |= m & devp->base.mask[VIUIN_WB_HDN];
+	}
+	/* a fresh channel deferred to another table lands with that table's
+	 * next frame
+	 */
+	if (viuin_wb.writer && fresh)
+		ret |= TVIN_TAP_PENDING;
 	/* the first reader of a channel programs it */
 	for (i = 0; i < TVIN_TAP_MAX; i++) {
 		if (!(mask & BIT(i)) || !(fresh & BIT(chan[i])))
 			continue;
 		fresh &= ~BIT(chan[i]);
 		port = ports[i];
+#ifndef CONFIG_AMLOGIC_ZAPPER_CUT
+		if (is_meson_t3x_cpu()) {
+			wr_viu(VPU_VIU2VDIN0_BUF_SIZE_T3X,
+				(devp->parm.v_active << 16) | (devp->parm.h_active << 0));
+			wr_viu(VPP_POST_HOLD_CTRL_T3X,	(1 << 31)    |
+							(1 << 30)    |
+							((devp->parm.h_active - 1) << 16) |
+							(4 << 8)     |
+							(1 << 4)     |
+							(2 << 0));
+		}
+#endif
+		wb = &devp->wb[i][chan[i]];
+		for (r = 0; r < VIUIN_WB_NUM; r++) {
+			if (wb->mask[r])
+				viuin_wb_set(r, (viuin_wb_get(r) & ~wb->mask[r]) | wb->val[r]);
+		}
 		if (port == TVIN_PORT_VIU1_VIDEO &&
 		    !is_meson_s5_cpu() && !is_meson_t3x_cpu()) {/*old chip*/
 			/* enable hsync for vdin loop */
@@ -827,37 +968,10 @@ static int viuin_bind(struct viuin_s *devp, enum tvin_port_e *ports, unsigned in
 			wr_bits_viu(VIU2_FRM_CTRL, 3, 24, 2);
 		}
 
-#ifndef CONFIG_AMLOGIC_ZAPPER_CUT
-		if (is_meson_gxbb_cpu() || is_meson_gxm_cpu() || is_meson_gxl_cpu()) {
-#ifndef CONFIG_AMLOGIC_REMOVE_OLD
-			if (devp->parm.v_active == 2160 && devp->parm.frame_rate > 30)
-				/* 1/2 down scaling */
-				wr_viu(VPU_VIU2VDIN_HDN_CTRL, 0x40f00);
-#endif
-		} else if (is_meson_s5_cpu()) {
-			wr_viu(VPU_VIU2VDIN_HDN_CTRL, devp->parm.h_active);
-			//wr_viu(S5_VPP_POST_HOLD_CTRL, 0xc77f0412);
-		} else if (is_meson_t3x_cpu()) {
-			wr_viu(VPU_VIU2VDIN0_BUF_SIZE_T3X,
-				(devp->parm.v_active << 16) | (devp->parm.h_active << 0));
-			wr_viu(VPP_POST_HOLD_CTRL_T3X,	(1 << 31)    |
-							(1 << 30)    |
-							((devp->parm.h_active - 1) << 16) |
-							(4 << 8)     |
-							(1 << 4)     |
-							(2 << 0));
-		} else
-#endif
-		{
-			wr_bits_viu(VPU_VIU2VDIN_HDN_CTRL, devp->parm.h_active, 0, 14);
-		}
-
 		/* select loopback path */
 		if (cpu_after_eq(MESON_CPU_MAJOR_ID_G12A)) {
 			/* set VPU_VIU_VDIN_IF_MUX_CTRL */
 			viuin_set_vdin_if_mux_ctrl(port);
-			/* set VPP_WR_BAK_CTRL */
-			viuin_set_wr_bak_ctrl(port);
 #ifndef CONFIG_AMLOGIC_ZAPPER_CUT
 			if (!is_meson_s5_cpu() && !is_meson_t3x_cpu()) {
 				/* wr_back hsync en */
@@ -874,7 +988,19 @@ static int viuin_bind(struct viuin_s *devp, enum tvin_port_e *ports, unsigned in
 			wr_bits_viu(VPU_VIU_VENC_MUX_CTRL, devp->viu_mux, 8, 4);
 		}
 	}
-	return 0;
+	if (sw != VIUIN_CHAN_MAX) {
+		for (i = 0; i < TVIN_TAP_MAX; i++) {
+			for (r = 0; r < VIUIN_WB_NUM; r++) {
+				if ((devp->bound & BIT(i)) && chan[i] == sw &&
+				    devp->wb[i][sw].mask[r])
+					viuin_wb_get(r);
+			}
+		}
+		devp->swc = sw;
+		viuin_wb.writer = devp;
+		ret |= TVIN_TAP_FIELD;
+	}
+	return ret;
 }
 
 /*g12a/g12b and before: use viu_loop encl/encp*/
@@ -884,7 +1010,10 @@ static int viuin_tap_open(struct tvin_frontend_s *fe, enum tvin_port_e *ports,
 			  enum tvin_port_type_e port_type)
 {
 	struct viuin_s *devp = container_of(fe, struct viuin_s, frontend);
+	struct viuin_wb_fields *wb;
 	unsigned long flags;
+	unsigned int r;
+	u32 m, val;
 	int ret;
 
 	if (!(mask & BIT(home)) || mask >= BIT(TVIN_TAP_MAX))
@@ -922,6 +1051,22 @@ static int viuin_tap_open(struct tvin_frontend_s *fe, enum tvin_port_e *ports,
 	default:
 		break;
 	}
+	memset(&devp->base, 0, sizeof(devp->base));
+#ifndef CONFIG_AMLOGIC_ZAPPER_CUT
+	if (is_meson_gxbb_cpu() || is_meson_gxm_cpu() || is_meson_gxl_cpu()) {
+#ifndef CONFIG_AMLOGIC_REMOVE_OLD
+		if (devp->parm.v_active == 2160 && devp->parm.frame_rate > 30)
+			/* 1/2 down scaling */
+			wb_bits(&devp->base, VIUIN_WB_HDN, 0x40f00, 0, 32);
+#endif
+	} else if (is_meson_s5_cpu()) {
+		wb_bits(&devp->base, VIUIN_WB_HDN, devp->parm.h_active, 0, 32);
+		//wr_viu(S5_VPP_POST_HOLD_CTRL, 0xc77f0412);
+	} else if (!is_meson_t3x_cpu())
+#endif
+	{
+		wb_bits(&devp->base, VIUIN_WB_HDN, devp->parm.h_active, 0, 14);
+	}
 	/*no need check here, will timeout sometimes*/
 	/*viuin_check_venc_line(devp);*/
 	spin_lock_irqsave(&viuin_lock, flags);
@@ -939,14 +1084,100 @@ static int viuin_tap_open(struct tvin_frontend_s *fe, enum tvin_port_e *ports,
 	devp->parm.port = ports[home];
 	devp->flag = 0;
 	open_cnt++;
+	/* the home input's fields and the input width; the start checks them
+	 * before this frontend's table runs, so the cpu writes them
+	 */
+	wb = &devp->wb[home][devp->chan[home]];
+	for (r = 0; r < VIUIN_WB_NUM; r++) {
+		m = wb->mask[r];
+		val = wb->val[r];
+		if (r == VIUIN_WB_HDN) {
+			m |= devp->base.mask[r];
+			val |= devp->base.val[r] & ~wb->mask[r];
+		}
+		if (!m)
+			continue;
+		val |= viuin_wb_get(r) & ~m;
+		viuin_wb_set(r, val);
+		if (viuin_wb.writer == devp)
+			wr_viu(viuin_wb_reg[r], val);
+	}
 	spin_unlock_irqrestore(&viuin_lock, flags);
 	return ret;
 }
 
+static void viuin_close(struct tvin_frontend_s *fe, enum tvin_port_type_e port_type);
+
 static int viuin_open(struct tvin_frontend_s *fe, enum tvin_port_e port,
 	enum tvin_port_type_e port_type)
 {
-	return viuin_tap_open(fe, &port, BIT(0), 0, port_type);
+	int ret = viuin_tap_open(fe, &port, BIT(0), 0, port_type);
+
+	/* no landing check follows this open for a field another table defers */
+	if (ret > 0 && (ret & TVIN_TAP_PENDING)) {
+		viuin_close(fe, port_type);
+		return -EBUSY;
+	}
+	return ret < 0 ? ret : 0;
+}
+
+/* from the vdin isr of the frontend whose table writes the registers:
+ * queue the shadow with the tap fields of input beside the write address
+ * of the buffer it fills; a second call in one table rewrites the entries
+ */
+static void viuin_tap_queue(struct tvin_frontend_s *fe, int rdma_handle,
+			    unsigned int input)
+{
+	struct viuin_s *devp = container_of(fe, struct viuin_s, frontend);
+	unsigned long flags;
+	unsigned int c;
+	unsigned int i;
+	u32 val;
+
+	spin_lock_irqsave(&viuin_lock, flags);
+	c = devp->chan[input];
+	for (i = 0; viuin_wb.writer == devp && i < VIUIN_WB_NUM; i++) {
+		if (!(viuin_wb.valid & BIT(i)))
+			continue;
+		val = viuin_wb.val[i];
+		if (c == devp->swc)
+			val = (val & ~devp->wb[input][c].mask[i]) | devp->wb[input][c].val[i];
+#ifdef CONFIG_AMLOGIC_MEDIA_RDMA
+		rdma_write_reg_bits(rdma_handle, viuin_wb_reg[i], val, 0, 32);
+#endif
+	}
+	spin_unlock_irqrestore(&viuin_lock, flags);
+}
+
+static bool viuin_tap_landed(struct tvin_frontend_s *fe, unsigned int input)
+{
+	struct viuin_s *devp = container_of(fe, struct viuin_s, frontend);
+	struct viuin_wb_fields *wb = &devp->wb[input][devp->chan[input]];
+	unsigned int i;
+
+	for (i = 0; i < VIUIN_WB_NUM; i++) {
+		if (wb->mask[i] && (rd_viu(viuin_wb_reg[i]) & wb->mask[i]) != wb->val[i])
+			return false;
+	}
+	return true;
+}
+
+/* after the rdma table is cleared: the cpu writes what the table carried */
+static void viuin_tap_disarm(struct tvin_frontend_s *fe)
+{
+	struct viuin_s *devp = container_of(fe, struct viuin_s, frontend);
+	unsigned long flags;
+	unsigned int i;
+
+	spin_lock_irqsave(&viuin_lock, flags);
+	if (viuin_wb.writer == devp) {
+		viuin_wb.writer = NULL;
+		for (i = 0; i < VIUIN_WB_NUM; i++) {
+			if (viuin_wb.valid & BIT(i))
+				wr_viu(viuin_wb_reg[i], viuin_wb.val[i]);
+		}
+	}
+	spin_unlock_irqrestore(&viuin_lock, flags);
 }
 
 static void viuin_close(struct tvin_frontend_s *fe, enum tvin_port_type_e port_type)
@@ -956,6 +1187,8 @@ static void viuin_close(struct tvin_frontend_s *fe, enum tvin_port_type_e port_t
 
 	/*no need check here, will timeout sometimes*/
 	/*viuin_check_venc_line(devp);*/
+	/* a start that failed before its rdma table ran */
+	viuin_tap_disarm(fe);
 	spin_lock_irqsave(&viuin_lock, flags);
 	/* a frontend whose open failed reads no channel */
 	if (!devp->chans) {
@@ -972,13 +1205,13 @@ static void viuin_close(struct tvin_frontend_s *fe, enum tvin_port_type_e port_t
 	if (!viuin_chan[0].readers && !viuin_chan[1].readers) {
 		if (cpu_after_eq(MESON_CPU_MAJOR_ID_G12A)) {
 			wr_viu(VPU_VIU_VDIN_IF_MUX_CTRL, 0);
-			wr_viu(VPP_WR_BAK_CTRL, 0);
+			viuin_wb_set(VIUIN_WB_VPP, 0);
 		} else {
 			wr_bits_viu(VPU_VIU_VENC_MUX_CTRL, 0, 8, 4);
 			wr_bits_viu(VPU_VIU_VENC_MUX_CTRL, 0, 4, 4);
 		}
-		if (rd_viu(VPU_VIU2VDIN_HDN_CTRL) != 0)
-			wr_viu(VPU_VIU2VDIN_HDN_CTRL, 0x0);
+		if (viuin_wb_get(VIUIN_WB_HDN) != 0)
+			viuin_wb_set(VIUIN_WB_HDN, 0x0);
 	}
 	spin_unlock_irqrestore(&viuin_lock, flags);
 }
@@ -1042,6 +1275,9 @@ static struct tvin_decoder_ops_s viu_dec_ops = {
 	.close              = viuin_close,
 	.decode_isr         = viuin_isr,
 	.tap_open           = viuin_tap_open,
+	.tap_queue          = viuin_tap_queue,
+	.tap_landed         = viuin_tap_landed,
+	.tap_disarm         = viuin_tap_disarm,
 	.tap_property       = viuin_port_property,
 };
 
