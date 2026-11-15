@@ -29,6 +29,8 @@
 /* Local Headers */
 #include "tvin_global.h"
 
+#define TVIN_TAP_MAX	7
+
 struct tvin_frontend_s;
 
 struct tvin_decoder_ops_s {
@@ -50,6 +52,14 @@ struct tvin_decoder_ops_s {
 			      struct tvin_frontend_s *fe);
 	int (*ioctl)(struct tvin_frontend_s *fe, void *args);
 	int (*decode_tsk)(struct tvin_frontend_s *fe);
+	/* open for the inputs in mask, ports indexed by input, each rewritten
+	 * to the port it was given; home is the input the vdin starts with
+	 */
+	int (*tap_open)(struct tvin_frontend_s *fe, enum tvin_port_e *ports,
+			unsigned int mask, unsigned int home,
+			enum tvin_port_type_e port_type);
+	void (*tap_property)(struct tvin_frontend_s *fe, enum tvin_port_e port,
+			     struct tvin_sig_property_s *prop);
 };
 
 struct tvin_state_machine_ops_s {
