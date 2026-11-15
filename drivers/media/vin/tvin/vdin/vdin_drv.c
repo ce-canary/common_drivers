@@ -1108,13 +1108,81 @@ bool vdin_v4l2_sched_supported(struct vdin_dev_s *devp, struct tvin_frontend_s *
 
 static void vdin_v4l2_queue_tap(struct vdin_dev_s *devp, unsigned int input)
 {
+#ifdef CONFIG_AMLOGIC_MEDIA_RDMA
+	struct vdin_v4l2_size *size = &devp->vdin_v4l2.run_size;
+	unsigned int offset = devp->addr_offset;
+	unsigned int src_w = devp->h_active_org;
+	unsigned int src_h = devp->v_active_org;
+	int handle = devp->rdma_handle;
+	u32 hsc_step, vsc_step;
+	bool pre;
+#endif
+
 	if (!devp->vdin_v4l2.sched_armed)
 		return;
 #ifdef CONFIG_AMLOGIC_MEDIA_RDMA
-	if (vdin_wb_src_sel())
-		rdma_write_reg_bits(devp->rdma_handle, VDIN_COM_CTRL0 + devp->addr_offset,
+	/* a second call in one table replaces the entries, so each call writes
+	 * them all
+	 */
+	pre = (devp->pre_h_scale_en || vdin_is_v4l2_10bit(devp)) &&
+	      size->width <= (src_w >> 1);
+	if (pre)
+		src_w >>= 1;
+	if (vdin_wb_src_sel()) {
+		rdma_write_reg_bits(handle, VDIN_COM_CTRL0 + offset,
 				    vdin_wb_src(devp->vdin_v4l2.sched_port[input]),
 				    VDIN_SEL_BIT, VDIN_SEL_WID);
+		rdma_write_reg_bits(handle, VDIN_SC_MISC_CTRL + offset, pre,
+				    PRE_HSCL_EN_BIT, PRE_HSCL_EN_WID);
+		rdma_write_reg_bits(handle, VDIN_SC_MISC_CTRL + offset, size->width < src_w,
+				    HSCL_EN_BIT, HSCL_EN_WID);
+		if (src_w >> 12)
+			hsc_step = ((src_w << 18) / size->width) << 6;
+		else
+			hsc_step = ((src_w << 20) / size->width) << 4;
+		rdma_write_reg_bits(handle, VDIN_HSC_PHASE_STEP + offset, hsc_step, 0, 32);
+		/* vdin_set_top leaves the output width in both fields after scaling */
+		rdma_write_reg_bits(handle, VDIN_WIDTHM1I_WIDTHM1O + offset,
+				    (size->width - 1) << WIDTHM1I_BIT | (size->width - 1), 0, 32);
+		rdma_write_reg_bits(handle, VDIN_VSC_INI_CTRL + offset, size->height < src_h,
+				    VSC_EN_BIT, VSC_EN_WID);
+		vsc_step = (src_h << 20) / size->height;
+		rdma_write_reg_bits(handle, VDIN_VSC_PHASE_STEP + offset, vsc_step, 0, 32);
+		rdma_write_reg_bits(handle, VDIN_SCIN_HEIGHTM1 + offset, src_h - 1,
+				    SCALER_INPUT_HEIGHT_BIT, SCALER_INPUT_HEIGHT_WID);
+		rdma_write_reg_bits(handle, VDIN_WR_H_START_END + offset, size->width - 1,
+				    WR_HEND_BIT, WR_HEND_WID);
+		rdma_write_reg_bits(handle, VDIN_WR_V_START_END + offset, size->height - 1,
+				    WR_VEND_BIT, WR_VEND_WID);
+	}
+#ifndef CONFIG_AMLOGIC_ZAPPER_CUT
+	if (is_meson_s5_cpu()) {
+		rdma_write_reg_bits(handle, VDIN_PP_TOP_CTRL + offset, pre,
+				    PP_PHSC_EN_BIT, PP_PHSC_EN_WID);
+		rdma_write_reg_bits(handle, VDIN_PP_TOP_CTRL + offset, size->width < src_w,
+				    PP_HSC_EN_BIT, PP_HSC_EN_WID);
+		rdma_write_reg_bits(handle, VDIN_PP_TOP_CTRL + offset, size->height < src_h,
+				    PP_VSC_EN_BIT, PP_VSC_EN_WID);
+		if (src_w >= 2048)
+			hsc_step = ((src_w << 18) / size->width) << 6;
+		else
+			hsc_step = ((src_w << 20) / size->width) << 4;
+		if (src_h >= 2048)
+			vsc_step = ((src_h << 18) / size->height) << 2;
+		else
+			vsc_step = (src_h << 20) / size->height;
+		rdma_write_reg_bits(handle, VDIN_PP_HSC_PHASE_STEP + offset, hsc_step, 0, 32);
+		rdma_write_reg_bits(handle, VDIN_PP_VSC_PHASE_STEP + offset, vsc_step, 0, 32);
+		rdma_write_reg_bits(handle, VDIN_PP_TOP_OUT_SIZE + offset,
+				    size->width << 16 | size->height, 0, 32);
+		rdma_write_reg_bits(handle, VDIN_DW_TOP_OUT_SIZE + offset,
+				    size->width << 16 | size->height, 0, 32);
+		rdma_write_reg_bits(handle, VDIN_WRMIF_H_START_END + offset, size->width - 1,
+				    WR_HEND_BIT, WR_HEND_WID);
+		rdma_write_reg_bits(handle, VDIN_WRMIF_V_START_END + offset, size->height - 1,
+				    WR_VEND_BIT, WR_VEND_WID);
+	}
+#endif
 #endif
 	if (devp->vdin_v4l2.sched_field)
 		devp->frontend->dec_ops->tap_queue(devp->frontend, devp->rdma_handle, input);
@@ -1146,6 +1214,8 @@ static bool vdin_v4l2_landed(struct vdin_dev_s *devp, struct vf_entry *vfe, bool
 {
 	u32 canvas_id = vfe->vf.canvas0Addr != (u32)-1 ? vfe->vf.canvas0Addr :
 			devp->vf_canvas_id[vfe->vf.index];
+	unsigned int h_end = VDIN_WR_H_START_END;
+	unsigned int v_end = VDIN_WR_V_START_END;
 	bool addr;
 
 #ifndef CONFIG_AMLOGIC_ZAPPER_CUT
@@ -1160,7 +1230,55 @@ static bool vdin_v4l2_landed(struct vdin_dev_s *devp, struct vf_entry *vfe, bool
 	    rd_bits(devp->addr_offset, VDIN_COM_CTRL0, VDIN_SEL_BIT, VDIN_SEL_WID) !=
 	    vdin_wb_src(devp->vdin_v4l2.sched_port[vfe->v4l2_input]))
 		return false;
+#ifndef CONFIG_AMLOGIC_ZAPPER_CUT
+	if (is_meson_s5_cpu()) {
+		h_end = VDIN_WRMIF_H_START_END;
+		v_end = VDIN_WRMIF_V_START_END;
+	}
+#endif
+	if (vfe->v4l2_entries && vdin_v4l2_size_live() &&
+	    (rd_bits(devp->addr_offset, h_end, WR_HEND_BIT, WR_HEND_WID) !=
+	     vfe->v4l2_size.width - 1 ||
+	     rd_bits(devp->addr_offset, v_end, WR_VEND_BIT, WR_VEND_WID) !=
+	     vfe->v4l2_size.height - 1))
+		return false;
 	return !field || devp->frontend->dec_ops->tap_landed(devp->frontend, vfe->v4l2_input);
+}
+
+/* under isr_lock: points vfe at its buffer with the layout of size; false
+ * while the mif may still write its canvas
+ */
+static bool vdin_v4l2_layout(struct vdin_dev_s *devp, struct vf_entry *vfe,
+			     const struct vdin_v4l2_size *size)
+{
+	struct vframe_s *vf = &vfe->vf;
+	unsigned long addr = devp->vf_mem_start[vf->index];
+	unsigned long c_addr = addr + size->stride * size->height;
+	u32 id = vf->canvas0Addr;
+
+	if (devp->work_mode != VDIN_WORK_MD_V4L ||
+	    !memcmp(&vfe->v4l2_size, size, sizeof(*size)))
+		return true;
+	if (devp->v4l2_fmt.fmt.pix_mp.num_planes == 2)
+		c_addr = devp->vf_mem_c_start[vf->index];
+	if (devp->dtdata->hw_ver >= VDIN_HW_T7) {
+		vf->canvas0_config[0].phy_addr = addr;
+		vf->canvas0_config[0].width = size->stride;
+		vf->canvas0_config[0].height = size->height;
+		vf->canvas0_config[1].phy_addr = c_addr;
+		vf->canvas0_config[1].width = size->stride;
+		vf->canvas0_config[1].height = size->height / 2;
+	} else {
+		if (vdin_get_canvas_id(devp->addr_offset) == (id & 0xff))
+			return false;
+		canvas_config(id & 0xff, addr, size->stride, size->height,
+			      CANVAS_ADDR_NOWRAP, CANVAS_BLKMODE_LINEAR);
+		if (vf->plane_num == 2)
+			canvas_config((id >> 8) & 0xff, c_addr, size->stride, size->height / 2,
+				      CANVAS_ADDR_NOWRAP, CANVAS_BLKMODE_LINEAR);
+	}
+	vfe->v4l2_size = *size;
+	return true;
 }
 
 static u32 vdin_is_delay_vfe2rd_list(struct vdin_dev_s *devp)
@@ -1529,6 +1647,10 @@ int vdin_start_dec(struct vdin_dev_s *devp)
 	vdin_game_mode_check(devp);
 	vdin_frame_lock_check(devp, 1);
 	vdin_vf_init(devp);
+	if (devp->work_mode == VDIN_WORK_MD_V4L) {
+		for (i = 0; i < devp->vfp->size; i++)
+			vf_get_master(devp->vfp, i)->v4l2_size = devp->vdin_v4l2.run_size;
+	}
 	/* config dolby mem base */
 	vdin_dolby_addr_alloc(devp, devp->vfp->size);
 #ifdef CONFIG_AMLOGIC_MEDIA_ENHANCEMENT_DOLBYVISION
@@ -4027,8 +4149,9 @@ irqreturn_t vdin_v4l2_isr(int irq, void *dev_id)
 	struct vdin_dev_s *devp = (struct vdin_dev_s *)dev_id;
 	struct vdin_dev_s *vdin0_devp = vdin_devp[0];
 	enum vdin_vf_put_md put_md = VDIN_VF_PUT;
-	struct vf_entry *next_wr_vfe = NULL, *curr_wr_vfe = NULL;
+	struct vf_entry *next_wr_vfe = NULL, *curr_wr_vfe = NULL, *vfe;
 	struct vframe_s *curr_wr_vf = NULL;
+	struct vdin_v4l2_size *size;
 	unsigned int last_field_type, stamp;
 	struct tvin_decoder_ops_s *dec_ops;
 	struct tvin_state_machine_ops_s *sm_ops;
@@ -4276,6 +4399,20 @@ irqreturn_t vdin_v4l2_isr(int irq, void *dev_id)
 		}
 	}
 
+	/* the next frame takes the size of the schedule it starts; a buffer
+	 * whose canvas the mif may still write waits at the tail
+	 */
+	size = devp->vdin_v4l2.pend_num ? &devp->vdin_v4l2.pend_size :
+	       &devp->vdin_v4l2.run_size;
+	if (next_wr_vfe && !vdin_v4l2_layout(devp, next_wr_vfe, size)) {
+		vfe = provider_vf_get(devp->vfp);
+		receiver_vf_put(&vfe->vf, devp->vfp);
+		next_wr_vfe = provider_vf_peek(devp->vfp);
+		if (next_wr_vfe == vfe ||
+		    (next_wr_vfe && !vdin_v4l2_layout(devp, next_wr_vfe, size)))
+			next_wr_vfe = NULL;
+	}
+
 	/* no buffer */
 	if (!next_wr_vfe) {
 		devp->vdin_irq_flag = VDIN_IRQ_FLG_NO_NEXT_FE;
@@ -4306,6 +4443,7 @@ irqreturn_t vdin_v4l2_isr(int irq, void *dev_id)
 		memcpy(devp->vdin_v4l2.run, devp->vdin_v4l2.pend,
 		       sizeof(devp->vdin_v4l2.run));
 		devp->vdin_v4l2.sched_armed = devp->vdin_v4l2.pend_num;
+		devp->vdin_v4l2.run_size = devp->vdin_v4l2.pend_size;
 		devp->vdin_v4l2.pend_num = 0;
 		devp->vdin_v4l2.sched_pos = 0;
 		devp->vdin_v4l2.sched_gen++;

@@ -741,6 +741,8 @@ struct vdin_v4l2_s {
 	unsigned int input;
 	unsigned int sched[TVIN_TAP_MAX];
 	unsigned int sched_num;
+	/* its size, none for the S_FMT size */
+	struct vdin_v4l2_size size;
 	/* the running schedule, none when the stream takes no turns; one set
 	 * while streaming waits in pend for the isr
 	 */
@@ -750,6 +752,8 @@ struct vdin_v4l2_s {
 	unsigned int sched_gen;
 	unsigned int pend[TVIN_TAP_MAX];
 	unsigned int pend_num;
+	struct vdin_v4l2_size run_size;
+	struct vdin_v4l2_size pend_size;
 	/* input of curr_wr_vfe */
 	unsigned int sched_cur;
 	/* inputs bound to a channel, and those whose tap field waits for
