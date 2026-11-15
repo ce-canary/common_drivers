@@ -761,6 +761,11 @@ struct vdin_v4l2_s {
 	 */
 	unsigned int held;
 	unsigned int pending;
+	/* inputs whose last judged frame was blank, and those whose last two
+	 * were, until released or stop_streaming
+	 */
+	unsigned int last_blank;
+	unsigned int no_signal;
 	/* the port the frontend gave each input */
 	enum tvin_port_e sched_port[VDIN_V4L2_INPUT_MAX];
 	/* fixed at STREAMON for inputs that join */
