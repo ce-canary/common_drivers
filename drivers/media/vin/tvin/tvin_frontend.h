@@ -30,6 +30,12 @@
 #include "tvin_global.h"
 
 #define TVIN_TAP_MAX	7
+/* tap_open: this frontend's rdma table switches a channel's tap field per
+ * frame (FIELD), or a channel's field waits for another frontend's table
+ * (PENDING)
+ */
+#define TVIN_TAP_FIELD		BIT(0)
+#define TVIN_TAP_PENDING	BIT(1)
 
 struct tvin_frontend_s;
 
@@ -58,6 +64,9 @@ struct tvin_decoder_ops_s {
 	int (*tap_open)(struct tvin_frontend_s *fe, enum tvin_port_e *ports,
 			unsigned int mask, unsigned int home,
 			enum tvin_port_type_e port_type);
+	void (*tap_queue)(struct tvin_frontend_s *fe, int rdma_handle, unsigned int input);
+	bool (*tap_landed)(struct tvin_frontend_s *fe, unsigned int input);
+	void (*tap_disarm)(struct tvin_frontend_s *fe);
 	void (*tap_property)(struct tvin_frontend_s *fe, enum tvin_port_e port,
 			     struct tvin_sig_property_s *prop);
 };
