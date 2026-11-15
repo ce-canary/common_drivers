@@ -50,6 +50,7 @@ static void vdin_v4l2_status(struct vdin_dev_s *devp)
 	pr_info("dque_cnt:%u\n", devp->vdin_v4l2.stats.dque_cnt);
 	pr_info("que_cnt:%u\n", devp->vdin_v4l2.stats.que_cnt);
 	pr_info("drop_divide:%u\n", devp->vdin_v4l2.stats.drop_divide);
+	pr_info("drop_unlanded:%u\n", devp->vdin_v4l2.stats.drop_unlanded);
 }
 
 static ssize_t v4l_dbg_show(struct device *dev,

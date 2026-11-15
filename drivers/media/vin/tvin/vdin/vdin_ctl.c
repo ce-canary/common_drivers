@@ -2870,6 +2870,12 @@ unsigned int vdin_get_canvas_id(unsigned int offset)
 	return rd_bits(offset, VDIN_WR_CTRL, WR_CANVAS_BIT, WR_CANVAS_WID);
 }
 
+unsigned int vdin_wb_src(enum tvin_port_e port)
+{
+	return port >= TVIN_PORT_VIU1_WB1_VDIN_BIST && port <= TVIN_PORT_VIU1_WB1_POST_BLEND ?
+	       VDIN_MUX_VIU1_WB1 : VDIN_MUX_VIU1_WB0;
+}
+
 void vdin_set_chroma_canvas_id(struct vdin_dev_s *devp, unsigned int rdma_enable,
 		struct vf_entry *vfe)
 {

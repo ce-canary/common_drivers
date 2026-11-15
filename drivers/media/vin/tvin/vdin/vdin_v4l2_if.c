@@ -145,6 +145,7 @@ int vdin_v4l2_if_isr(struct vdin_dev_s *devp, struct vframe_s *vfp)
 	struct vb2_queue *vb_que;
 	struct vb2_buffer *vb2buf;
 	struct vb2_v4l2_buffer *vb = NULL;
+	struct vf_entry *vfe = container_of(vfp, struct vf_entry, vf);
 
 	if (!devp->vb_queue.streaming) {
 		dprintk(2, "not streaming\n");
@@ -180,6 +181,9 @@ int vdin_v4l2_if_isr(struct vdin_dev_s *devp, struct vframe_s *vfp)
 	spin_unlock(&devp->list_head_lock);
 	devp->vdin_v4l2.stats.done_cnt++;
 	vb2buf->timestamp = ktime_get_ns();
+	memset(&vb->timecode, 0, sizeof(vb->timecode));
+	vb->timecode.userbits[0] = vfe->v4l2_input;
+	vb->flags |= V4L2_BUF_FLAG_TIMECODE;
 	vb2_buffer_done(vb2buf, VB2_BUF_STATE_DONE);
 
 	return 0;
@@ -439,6 +443,9 @@ static int vdin_vidioc_reqbufs(struct file *file, void *priv,
 		dprintk(0, "vb2_ioctl_reqbufs fail\n");
 	else
 		devp->v4l2_req_buf_num = reqbufs->count;
+	/* vb2 refuses a release while streaming */
+	if (!ret && !reqbufs->count)
+		devp->vdin_v4l2.sched_num = 0;
 
 	vb_buf = to_vb2_v4l2_buffer(devp->vb_queue.bufs[i]);
 	vdin_buf = to_vdin_vb_buf(vb_buf);
@@ -836,6 +843,9 @@ static int vdin_vidioc_s_divide_fr(struct vdin_dev_s *devp,
 			__func__, ctrl->value);
 		return -EINVAL;
 	}
+	/* a dropped frame would take a tap out of its turn */
+	if (ctrl->value > 1 && devp->vdin_v4l2.sched_num)
+		return -EINVAL;
 	devp->vdin_v4l2.divide = ctrl->value;
 	dprintk(2, "%s set divide value to %d\n",
 		__func__, devp->vdin_v4l2.divide);
@@ -870,6 +880,53 @@ static int vdin_vidioc_s_drm_mode(struct vdin_dev_s *devp,
 	devp->vdin_v4l2.secure_flg = !!ctrl->value;
 	dprintk(0, "%s vdin%d,secure flag:%d\n",
 		__func__, devp->index, devp->vdin_v4l2.secure_flg);
+
+	return 0;
+}
+
+static int vdin_vidioc_s_input_schedule(struct vdin_dev_s *devp,
+					struct file *file,
+					struct v4l2_ext_control *ctrl)
+{
+	struct v4l2_ext_capture_input_schedule sched;
+	struct tvin_frontend_s *fe;
+	unsigned int num;
+	unsigned int i;
+
+	if (devp->vb_queue.owner != file->private_data ||
+	    vb2_is_streaming(&devp->vb_queue))
+		return -EBUSY;
+	if (ctrl->size != sizeof(sched))
+		return -EINVAL;
+	if (copy_from_user(&sched, ctrl->ptr, sizeof(sched)))
+		return -EFAULT;
+	BUILD_BUG_ON(ARRAY_SIZE(sched.inputs) != TVIN_TAP_MAX);
+	num = sched.count;
+	if (!num || num > TVIN_TAP_MAX)
+		return -EINVAL;
+	fe = vdin_get_frontend(devp, devp->v4l2_port_cur, 0);
+	if (num > 1 && !vdin_v4l2_sched_supported(devp, fe))
+		return -EOPNOTSUPP;
+	if (num > 1 && devp->vdin_v4l2.divide > 1)
+		return -EINVAL;
+
+	for (i = 0; i < num; i++) {
+		if (sched.inputs[i] >= devp->v4l2_port_num)
+			return -EINVAL;
+		if (num == 1 ?
+		    devp->v4l2_port[sched.inputs[i]] != devp->v4l2_port_cur :
+		    vdin_get_frontend(devp, devp->v4l2_port[sched.inputs[i]], 0) != fe)
+			return -EINVAL;
+	}
+
+	if ((sched.width || sched.height) &&
+	    (sched.width != devp->v4l2_fmt.fmt.pix_mp.width ||
+	     sched.height != devp->v4l2_fmt.fmt.pix_mp.height))
+		return -EINVAL;
+
+	memcpy(devp->vdin_v4l2.sched, sched.inputs, num * sizeof(sched.inputs[0]));
+	devp->vdin_v4l2.sched_num = num > 1 ? num : 0;
+	dprintk(1, "%s vdin%d %d taps\n", __func__, devp->index, num);
 
 	return 0;
 }
@@ -1214,6 +1271,9 @@ static int vdin_vidioc_s_ext_ctrls(struct file *file, void *fh,
 		case V4L2_CID_EXT_CAPTURE_VIDEO_WIN_INFO:
 			ret = vdin_vidioc_s_cid_video_win_info(devp, ctrl);
 			break;
+		case V4L2_CID_EXT_CAPTURE_INPUT_SCHEDULE:
+			ret = vdin_vidioc_s_input_schedule(devp, file, ctrl);
+			break;
 		default:
 			ret = -EINVAL;
 			break;
@@ -1272,6 +1332,8 @@ static int vdin_vidioc_s_input(struct file *file, void *priv, unsigned int i)
 	devp->parm.index    = devp->index;
 	devp->parm.port     = devp->v4l2_port[i];
 	devp->v4l2_port_cur = devp->v4l2_port[i];
+	devp->vdin_v4l2.input = i;
+	devp->vdin_v4l2.sched_num = 0;
 	devp->unstable_flag = false;
 
 	devp->work_mode = VDIN_WORK_MD_V4L;
@@ -1455,7 +1517,7 @@ static int vdin_vidioc_g_parm(struct file *file, void *priv,
 
 	period->numerator = vinfo->sync_duration_den;
 	period->denominator = vinfo->sync_duration_num;
-	if (vdin_v4l2_is_field(devp))
+	if (vdin_v4l2_is_field(devp, devp->v4l2_port_cur))
 		period->numerator *= 2;
 
 	return 0;
@@ -1579,6 +1641,7 @@ static int vdin_v4l2_release(struct file *file)
 	if (devp->work_mode == VDIN_WORK_MD_V4L)
 		devp->afbce_flag = devp->afbce_flag_backup;
 	devp->work_mode = VDIN_WORK_MD_NORMAL;
+	devp->vdin_v4l2.sched_num = 0;
 #ifdef CONFIG_AMLOGIC_MEDIA_TVIN_HDMI
 	if (IS_HDMI_SRC(devp->v4l2_port_cur))
 		rx_update_edid_callback(devp->v4l2_port_cur, RX_EDID_DEFAULT);
