@@ -610,10 +610,13 @@ enum v4l2_ext_adc_calibration_type {
 #define V4L2_CID_EXT_CAPTURE_DIVIDE_FRAMERATE                                  \
 	(V4L2_CID_USER_EXT_CAPTURE_BASE + 8)
 
-/* A compound control set with VIDIOC_S_EXT_CTRLS before STREAMON: the
- * stream reads inputs[0..count-1] in turn, one per frame; width and height
- * are 0 or the S_FMT size. Each DONE buffer carries the input that filled
- * it in timecode userbits[0].
+/* A compound control set with VIDIOC_S_EXT_CTRLS: the stream reads
+ * inputs[0..count-1] in turn, one per frame; width and height are 0 or the
+ * S_FMT size. Set on a running stream, the list starts at the next frame,
+ * and the inputs it left are given back once its first frame has landed.
+ * Each DONE buffer carries in its timecode the input that filled it in
+ * userbits[0], the entries of its list in userbits[1] and the low byte of
+ * the list's generation in userbits[2], stepped per adopted list.
  */
 #define V4L2_CID_EXT_CAPTURE_INPUT_SCHEDULE                                    \
 	(V4L2_CID_USER_EXT_CAPTURE_BASE + 9)
