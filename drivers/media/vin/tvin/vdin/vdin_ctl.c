@@ -611,6 +611,18 @@ u32 vdin_matrix_range_chk(struct vdin_dev_s *devp)
 	}
 }
 
+enum vdin_format_convert_e
+vdin_v4l2_format_convert(enum tvin_color_fmt_e cfmt, u32 pixelformat)
+{
+	bool rgb = cfmt == TVIN_RGB444;
+
+	if (pixelformat == V4L2_PIX_FMT_NV12 || pixelformat == V4L2_PIX_FMT_NV12M)
+		return rgb ? VDIN_FORMAT_CONVERT_RGB_NV12 : VDIN_FORMAT_CONVERT_YUV_NV12;
+	if (pixelformat == V4L2_PIX_FMT_NV21 || pixelformat == V4L2_PIX_FMT_NV21M)
+		return rgb ? VDIN_FORMAT_CONVERT_RGB_NV21 : VDIN_FORMAT_CONVERT_YUV_NV21;
+	return rgb ? VDIN_FORMAT_CONVERT_RGB_YUV422 : VDIN_FORMAT_CONVERT_YUV_YUV422;
+}
+
 /* set format_convert
  * base on parameters:
  *	a.color_format
@@ -790,25 +802,9 @@ void vdin_get_format_convert(struct vdin_dev_s *devp)
 	if (devp->work_mode == VDIN_WORK_MD_V4L) {
 		pr_info("%s vdin v4l2 mode,color_format:%#x,pixelformat:%#x\n", __func__,
 			devp->prop.color_format, devp->v4l2_fmt.fmt.pix_mp.pixelformat);
-		if (devp->prop.color_format == TVIN_RGB444) {
-			if (devp->v4l2_fmt.fmt.pix_mp.pixelformat == V4L2_PIX_FMT_NV12 ||
-				devp->v4l2_fmt.fmt.pix_mp.pixelformat == V4L2_PIX_FMT_NV12M)
-				format_convert = VDIN_FORMAT_CONVERT_RGB_NV12;
-			else if (devp->v4l2_fmt.fmt.pix_mp.pixelformat == V4L2_PIX_FMT_NV21 ||
-				devp->v4l2_fmt.fmt.pix_mp.pixelformat == V4L2_PIX_FMT_NV21M)
-				format_convert = VDIN_FORMAT_CONVERT_RGB_NV21;
-			else
-				format_convert = VDIN_FORMAT_CONVERT_RGB_YUV422;
-		} else {
-			if (devp->v4l2_fmt.fmt.pix_mp.pixelformat == V4L2_PIX_FMT_NV12 ||
-				devp->v4l2_fmt.fmt.pix_mp.pixelformat == V4L2_PIX_FMT_NV12M)
-				format_convert = VDIN_FORMAT_CONVERT_YUV_NV12;
-			else if (devp->v4l2_fmt.fmt.pix_mp.pixelformat == V4L2_PIX_FMT_NV21 ||
-				devp->v4l2_fmt.fmt.pix_mp.pixelformat == V4L2_PIX_FMT_NV21M)
-				format_convert = VDIN_FORMAT_CONVERT_YUV_NV21;
-			else
-				format_convert = VDIN_FORMAT_CONVERT_YUV_YUV422;
-		}
+		format_convert =
+			vdin_v4l2_format_convert(devp->prop.color_format,
+						 devp->v4l2_fmt.fmt.pix_mp.pixelformat);
 	}
 
 	devp->format_convert = format_convert;
@@ -2874,6 +2870,25 @@ unsigned int vdin_wb_src(enum tvin_port_e port)
 {
 	return port >= TVIN_PORT_VIU1_WB1_VDIN_BIST && port <= TVIN_PORT_VIU1_WB1_POST_BLEND ?
 	       VDIN_MUX_VIU1_WB1 : VDIN_MUX_VIU1_WB0;
+}
+
+/* s5 and t3x have their own top, without a source select in VDIN_COM_CTRL0 */
+bool vdin_wb_src_sel(void)
+{
+#ifndef CONFIG_AMLOGIC_ZAPPER_CUT
+	if (is_meson_s5_cpu() || is_meson_t3x_cpu())
+		return false;
+#endif
+	return true;
+}
+
+void vdin_set_wb_asfifo(struct vdin_dev_s *devp, enum tvin_port_e port)
+{
+	if (!vdin_wb_src_sel())
+		return;
+	wr_bits(devp->addr_offset, VDIN_ASFIFO_CTRL3, 0xe4,
+		vdin_wb_src(port) == VDIN_MUX_VIU1_WB1 ? VDI8_ASFIFO_CTRL_BIT :
+		VDI6_ASFIFO_CTRL_BIT, VDI_ASFIFO_CTRL_WID);
 }
 
 void vdin_set_chroma_canvas_id(struct vdin_dev_s *devp, unsigned int rdma_enable,

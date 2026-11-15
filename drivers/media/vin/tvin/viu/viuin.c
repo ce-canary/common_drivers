@@ -869,7 +869,8 @@ static int viuin_bind(struct viuin_s *devp, enum tvin_port_e *ports, unsigned in
 				chan[i] = c;
 				break;
 			}
-			if (!viuin_chan[c].readers && chan[i] == VIUIN_CHAN_MAX)
+			if (!viuin_chan[c].readers && chan[i] == VIUIN_CHAN_MAX &&
+			    !(viuin_wb.writer && viuin_wb.writer->swc == c))
 				chan[i] = c;
 		}
 		c = chan[i];
@@ -888,10 +889,16 @@ static int viuin_bind(struct viuin_s *devp, enum tvin_port_e *ports, unsigned in
 	for (i = 0; i < TVIN_TAP_MAX; i++) {
 		if (!(mask & BIT(i)) || chan[i] != VIUIN_CHAN_MAX)
 			continue;
+		/* a writer keeps its channel while it reads it alone */
+		if (viuin_wb.writer == devp && (devp->chans & BIT(devp->swc)) &&
+		    viuin_chan[devp->swc].readers == 1)
+			sw = devp->swc;
 		/* the highest such channel; 0 serves the histogram */
 		c = VIUIN_CHAN_MAX;
-		while (sw == VIUIN_CHAN_MAX && !viuin_wb.writer && c--) {
-			if ((fresh & BIT(c)) && viuin_is_tap(viuin_chan[c].tap))
+		while (sw == VIUIN_CHAN_MAX && (!viuin_wb.writer || viuin_wb.writer == devp) &&
+		       c--) {
+			if ((devp->chans & BIT(c)) && viuin_chan[c].readers == 1 &&
+			    viuin_is_tap(viuin_chan[c].tap))
 				sw = c;
 		}
 		if (sw == VIUIN_CHAN_MAX || !viuin_is_tap(devp->tap[i]))
@@ -1106,6 +1113,60 @@ static int viuin_tap_open(struct tvin_frontend_s *fe, enum tvin_port_e *ports,
 	return ret;
 }
 
+static int viuin_tap_bind(struct tvin_frontend_s *fe, enum tvin_port_e *ports,
+			  unsigned int mask)
+{
+	struct viuin_s *devp = container_of(fe, struct viuin_s, frontend);
+	unsigned long flags;
+	int ret = -EINVAL;
+
+	spin_lock_irqsave(&viuin_lock, flags);
+	if (devp->chans && !(mask & devp->bound) && mask < BIT(TVIN_TAP_MAX))
+		ret = viuin_bind(devp, ports, mask);
+	spin_unlock_irqrestore(&viuin_lock, flags);
+	return ret;
+}
+
+/* the channels no input left reads are given back; a switched channel
+ * left with one input keeps that input's tap
+ */
+static bool viuin_tap_release(struct tvin_frontend_s *fe, unsigned int mask)
+{
+	struct viuin_s *devp = container_of(fe, struct viuin_s, frontend);
+	struct viuin_wb_fields *wb;
+	unsigned int chans = 0;
+	unsigned int last = 0;
+	unsigned int on_sw = 0;
+	unsigned long flags;
+	unsigned int i, r;
+	bool writer;
+
+	spin_lock_irqsave(&viuin_lock, flags);
+	writer = viuin_wb.writer == devp;
+	devp->bound &= ~mask;
+	for (i = 0; i < TVIN_TAP_MAX; i++) {
+		if (!(devp->bound & BIT(i)))
+			continue;
+		chans |= BIT(devp->chan[i]);
+		if (writer && devp->chan[i] == devp->swc) {
+			on_sw++;
+			last = i;
+		}
+	}
+	viuin_put_chans(devp->chans & ~chans);
+	devp->chans = chans;
+	if (on_sw == 1) {
+		wb = &devp->wb[last][devp->swc];
+		for (r = 0; r < VIUIN_WB_NUM; r++) {
+			if (wb->mask[r])
+				viuin_wb_set(r, (viuin_wb_get(r) & ~wb->mask[r]) | wb->val[r]);
+		}
+		viuin_chan[devp->swc].tap = devp->tap[last];
+	}
+	spin_unlock_irqrestore(&viuin_lock, flags);
+	return on_sw > 1;
+}
+
 static void viuin_close(struct tvin_frontend_s *fe, enum tvin_port_type_e port_type);
 
 static int viuin_open(struct tvin_frontend_s *fe, enum tvin_port_e port,
@@ -1140,7 +1201,7 @@ static void viuin_tap_queue(struct tvin_frontend_s *fe, int rdma_handle,
 		if (!(viuin_wb.valid & BIT(i)))
 			continue;
 		val = viuin_wb.val[i];
-		if (c == devp->swc)
+		if (c == devp->swc && (devp->bound & BIT(input)))
 			val = (val & ~devp->wb[input][c].mask[i]) | devp->wb[input][c].val[i];
 #ifdef CONFIG_AMLOGIC_MEDIA_RDMA
 		rdma_write_reg_bits(rdma_handle, viuin_wb_reg[i], val, 0, 32);
@@ -1152,14 +1213,20 @@ static void viuin_tap_queue(struct tvin_frontend_s *fe, int rdma_handle,
 static bool viuin_tap_landed(struct tvin_frontend_s *fe, unsigned int input)
 {
 	struct viuin_s *devp = container_of(fe, struct viuin_s, frontend);
-	struct viuin_wb_fields *wb = &devp->wb[input][devp->chan[input]];
+	struct viuin_wb_fields *wb;
+	unsigned long flags;
+	bool landed;
 	unsigned int i;
 
-	for (i = 0; i < VIUIN_WB_NUM; i++) {
+	spin_lock_irqsave(&viuin_lock, flags);
+	landed = devp->bound & BIT(input);
+	wb = &devp->wb[input][devp->chan[input]];
+	for (i = 0; landed && i < VIUIN_WB_NUM; i++) {
 		if (wb->mask[i] && (rd_viu(viuin_wb_reg[i]) & wb->mask[i]) != wb->val[i])
-			return false;
+			landed = false;
 	}
-	return true;
+	spin_unlock_irqrestore(&viuin_lock, flags);
+	return landed;
 }
 
 /* after the rdma table is cleared: the cpu writes what the table carried */
@@ -1275,6 +1342,8 @@ static struct tvin_decoder_ops_s viu_dec_ops = {
 	.close              = viuin_close,
 	.decode_isr         = viuin_isr,
 	.tap_open           = viuin_tap_open,
+	.tap_bind           = viuin_tap_bind,
+	.tap_release        = viuin_tap_release,
 	.tap_queue          = viuin_tap_queue,
 	.tap_landed         = viuin_tap_landed,
 	.tap_disarm         = viuin_tap_disarm,

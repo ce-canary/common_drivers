@@ -182,7 +182,9 @@ int vdin_v4l2_if_isr(struct vdin_dev_s *devp, struct vframe_s *vfp)
 	devp->vdin_v4l2.stats.done_cnt++;
 	vb2buf->timestamp = ktime_get_ns();
 	memset(&vb->timecode, 0, sizeof(vb->timecode));
-	vb->timecode.userbits[0] = vfe->v4l2_input;
+	vb->timecode.userbits[0] = vfe->v4l2_entries ? vfe->v4l2_input : devp->vdin_v4l2.input;
+	vb->timecode.userbits[1] = max(vfe->v4l2_entries, 1U);
+	vb->timecode.userbits[2] = vfe->v4l2_gen & 0xff;
 	vb->flags |= V4L2_BUF_FLAG_TIMECODE;
 	vb2_buffer_done(vb2buf, VB2_BUF_STATE_DONE);
 
@@ -838,13 +840,21 @@ static int vdin_vidioc_s_fmt_vid_cap_mplane(struct file *file,
 static int vdin_vidioc_s_divide_fr(struct vdin_dev_s *devp,
 			 struct v4l2_control *ctrl)
 {
+	unsigned long flags;
+	bool sched;
+
 	if (ctrl->value < 0 || ctrl->value > 240) {
 		dprintk(0, "%s divide value=%d,over range\n",
 			__func__, ctrl->value);
 		return -EINVAL;
 	}
+	/* the isr moves a pending schedule to the armed one */
+	spin_lock_irqsave(&devp->isr_lock, flags);
+	sched = devp->vdin_v4l2.sched_armed > 1 || devp->vdin_v4l2.pend_num > 1;
+	spin_unlock_irqrestore(&devp->isr_lock, flags);
 	/* a dropped frame would take a tap out of its turn */
-	if (ctrl->value > 1 && devp->vdin_v4l2.sched_num)
+	if (ctrl->value > 1 &&
+	    (devp->vdin_v4l2.sched_num || (vb2_is_streaming(&devp->vb_queue) && sched)))
 		return -EINVAL;
 	devp->vdin_v4l2.divide = ctrl->value;
 	dprintk(2, "%s set divide value to %d\n",
@@ -889,12 +899,16 @@ static int vdin_vidioc_s_input_schedule(struct vdin_dev_s *devp,
 					struct v4l2_ext_control *ctrl)
 {
 	struct v4l2_ext_capture_input_schedule sched;
-	struct tvin_frontend_s *fe;
+	enum tvin_port_e ports[VDIN_V4L2_INPUT_MAX];
 	unsigned int num;
-	unsigned int i;
+	struct tvin_sig_property_s *prop;
+	struct tvin_frontend_s *fe;
+	unsigned long flags;
+	unsigned int i, add;
+	bool streaming;
+	int ret;
 
-	if (devp->vb_queue.owner != file->private_data ||
-	    vb2_is_streaming(&devp->vb_queue))
+	if (devp->vb_queue.owner != file->private_data)
 		return -EBUSY;
 	if (ctrl->size != sizeof(sched))
 		return -EINVAL;
@@ -904,6 +918,7 @@ static int vdin_vidioc_s_input_schedule(struct vdin_dev_s *devp,
 	num = sched.count;
 	if (!num || num > TVIN_TAP_MAX)
 		return -EINVAL;
+	streaming = vb2_is_streaming(&devp->vb_queue);
 	fe = vdin_get_frontend(devp, devp->v4l2_port_cur, 0);
 	if (num > 1 && !vdin_v4l2_sched_supported(devp, fe))
 		return -EOPNOTSUPP;
@@ -913,7 +928,7 @@ static int vdin_vidioc_s_input_schedule(struct vdin_dev_s *devp,
 	for (i = 0; i < num; i++) {
 		if (sched.inputs[i] >= devp->v4l2_port_num)
 			return -EINVAL;
-		if (num == 1 ?
+		if (num == 1 && !streaming ?
 		    devp->v4l2_port[sched.inputs[i]] != devp->v4l2_port_cur :
 		    vdin_get_frontend(devp, devp->v4l2_port[sched.inputs[i]], 0) != fe)
 			return -EINVAL;
@@ -924,11 +939,72 @@ static int vdin_vidioc_s_input_schedule(struct vdin_dev_s *devp,
 	     sched.height != devp->v4l2_fmt.fmt.pix_mp.height))
 		return -EINVAL;
 
-	memcpy(devp->vdin_v4l2.sched, sched.inputs, num * sizeof(sched.inputs[0]));
-	devp->vdin_v4l2.sched_num = num > 1 ? num : 0;
-	dprintk(1, "%s vdin%d %d taps\n", __func__, devp->index, num);
+	if (!streaming) {
+		memcpy(devp->vdin_v4l2.sched, sched.inputs, num * sizeof(sched.inputs[0]));
+		devp->vdin_v4l2.sched_num = num > 1 ? num : 0;
+		dprintk(1, "%s vdin%d %d taps\n", __func__, devp->index, num);
+		return 0;
+	}
 
-	return 0;
+	/* a stream that takes no turns restarts for a new list */
+	if (!devp->vdin_v4l2.sched_armed || devp->frontend != fe)
+		return -EOPNOTSUPP;
+	add = vdin_v4l2_inputs(sched.inputs, num);
+	for (i = 0; i < VDIN_V4L2_INPUT_MAX; i++) {
+		if ((add & BIT(i)) &&
+		    vdin_v4l2_is_field(devp, devp->v4l2_port[i]) != devp->vdin_v4l2.ref_field)
+			return -EOPNOTSUPP;
+		ports[i] = devp->v4l2_port[i];
+	}
+	prop = kzalloc(sizeof(*prop), GFP_KERNEL);
+	if (!prop)
+		return -ENOMEM;
+	ret = 0;
+	for (i = 0; i < VDIN_V4L2_INPUT_MAX && !ret; i++) {
+		if (!(add & BIT(i)))
+			continue;
+		fe->dec_ops->tap_property(fe, ports[i], prop);
+		if (vdin_v4l2_format_convert(prop->color_format,
+					     devp->v4l2_fmt.fmt.pix_mp.pixelformat) !=
+		    devp->vdin_v4l2.convert)
+			ret = -EINVAL;
+	}
+	kfree(prop);
+	if (ret)
+		return ret;
+
+	/* the isr adopts the list under isr_lock; one it has not adopted yet
+	 * is replaced
+	 */
+	spin_lock_irqsave(&devp->isr_lock, flags);
+	add &= ~devp->vdin_v4l2.held;
+	/* vdin_stop_dec may have begun since the checks above */
+	ret = -EBUSY;
+	if (devp->vdin_v4l2.live && devp->vdin_v4l2.sched_armed)
+		ret = add ? fe->dec_ops->tap_bind(fe, ports, add) : 0;
+	if (ret >= 0) {
+		for (i = 0; i < VDIN_V4L2_INPUT_MAX; i++) {
+			if (!(add & BIT(i)))
+				continue;
+			devp->vdin_v4l2.sched_port[i] = ports[i];
+			vdin_set_wb_asfifo(devp, ports[i]);
+		}
+		devp->vdin_v4l2.held |= add;
+		if (ret & TVIN_TAP_PENDING)
+			devp->vdin_v4l2.pending |= add;
+		/* the writer role and its queueing start in one isr_lock section */
+		if (ret & TVIN_TAP_FIELD) {
+			devp->vdin_v4l2.sched_field = true;
+			devp->vdin_v4l2.field_drop = false;
+		}
+		memcpy(devp->vdin_v4l2.pend, sched.inputs, num * sizeof(sched.inputs[0]));
+		devp->vdin_v4l2.pend_num = num;
+		ret = 0;
+	}
+	spin_unlock_irqrestore(&devp->isr_lock, flags);
+	dprintk(1, "%s vdin%d %d taps live: %d\n", __func__, devp->index, num, ret);
+
+	return ret;
 }
 
 static int vdin_vidioc_s_ctrl(struct file *file, void *priv,
