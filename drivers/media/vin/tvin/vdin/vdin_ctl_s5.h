@@ -57,6 +57,7 @@ unsigned int vdin_get_active_h(struct vdin_dev_s *devp);
 unsigned int vdin_get_active_v(struct vdin_dev_s *devp);
 unsigned int vdin_get_total_v(struct vdin_dev_s *devp);
 unsigned int vdin_get_canvas_id(unsigned int offset);
+bool vdin_wr_addr_is_s5(struct vdin_dev_s *devp, struct vf_entry *vfe);
 void vdin_set_canvas_id_s5(struct vdin_dev_s *devp,
 			unsigned int rdma_enable,
 			struct vf_entry *vfe);

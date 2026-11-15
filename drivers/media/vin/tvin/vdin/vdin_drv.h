@@ -751,6 +751,9 @@ struct vdin_v4l2_s {
 	enum tvin_port_e sched_port[VDIN_V4L2_INPUT_MAX];
 	/* the inputs are read through more than one vdin source */
 	bool sched_srcs;
+	/* this table writes the tap field, or the field waits for another table */
+	bool sched_field;
+	bool sched_pending;
 };
 
 struct vdin_vrr_s {
