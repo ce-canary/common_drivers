@@ -136,6 +136,10 @@ struct vf_entry {
 	/* for one buffer mode,backup the initial mif phy address */
 	unsigned long phy_y_addr_bak;
 	unsigned long phy_c_addr_bak;
+	/* the v4l2 input that fills this buffer */
+	unsigned int v4l2_input;
+	/* its frame did not start with its own address and source */
+	bool v4l2_unlanded;
 };
 
 struct vf_pool {
