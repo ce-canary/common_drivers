@@ -2234,15 +2234,7 @@ int vdin_v4l2_start_tvin(struct vdin_dev_s *devp)
 
 int vdin_v4l2_stop_tvin(struct vdin_dev_s *devp)
 {
-	int ret;
-
-	ret = stop_tvin_service(devp->index);
-
-	mutex_lock(&devp->fe_lock);
-	vdin_close_fe(devp);
-	mutex_unlock(&devp->fe_lock);
-
-	return ret;
+	return stop_tvin_service(devp->index);
 }
 
 void vdin_v4l2_init(struct vdin_dev_s *devp, struct platform_device *pl_dev)
