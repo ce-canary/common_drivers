@@ -47,6 +47,9 @@ int pts_pickout_offset_us64(u8 type, u32 offset,
 			    u32 *val, u32 pts_margin,
 			    u64 *us64);
 
+int pts_pickout_between_us64(u8 type, u32 after, u32 before,
+			     u32 *val, u64 *us64);
+
 int pts_set_resolution(u8 type, u32 level);
 
 int pts_set_rec_size(u8 type, u32 val);
@@ -124,6 +127,12 @@ int __weak pts_lookup_offset_us64(u8 type, u32 offset, u32 *val,
 int __weak pts_pickout_offset_us64(u8 type, u32 offset,
 			    u32 *val, u32 pts_margin,
 			    u64 *us64)
+{
+	return -1;
+}
+
+int __weak pts_pickout_between_us64(u8 type, u32 after, u32 before,
+			     u32 *val, u64 *us64)
 {
 	return -1;
 }
