@@ -1306,6 +1306,36 @@ int pts_pickout_offset_us64(u8 type, u32 offset, u32 *val, u32 pts_margin,
 }
 EXPORT_SYMBOL(pts_pickout_offset_us64);
 
+int pts_pickout_between_us64(u8 type, u32 after, u32 before, u32 *val,
+			     u64 *us64)
+{
+	struct pts_rec_s *p = NULL;
+	unsigned long flags;
+	int res = -1;
+
+	if (type >= PTS_TYPE_MAX)
+		return -EINVAL;
+
+	spin_lock_irqsave(&lock, flags);
+	if (likely(pts_table[type].status == PTS_RUNNING)) {
+		/* newest first: the walk ends at the records still in flight after `after` */
+		list_for_each_entry_reverse(p, &pts_table[type].valid_list, list) {
+			if (!OFFSET_LATER(p->offset, after))
+				break;
+
+			if (OFFSET_LATER(before, p->offset)) {
+				*val = p->val;
+				*us64 = p->pts_us64;
+				res = 0;
+			}
+		}
+	}
+	spin_unlock_irqrestore(&lock, flags);
+
+	return res;
+}
+EXPORT_SYMBOL(pts_pickout_between_us64);
+
 int pts_set_resolution(u8 type, u32 level)
 {
 	if (type >= PTS_TYPE_MAX)
